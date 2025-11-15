@@ -268,57 +268,52 @@ elif mode == "Overlay Contours":
 # ==================================================================
 else:  # Heatmap
     with st.sidebar:
-        st.subheader("Distribution")
-        dist = st.selectbox("Type", ["Normal", "Lognormal", "Uniform"])
-        st.subheader("Variogram")
-        vario = st.selectbox("Behavior", ["Smooth", "Short", "Long"])
         st.subheader("Grid")
         res = st.slider("Resolution", 50, 500, 200, 25)
         cmap = st.selectbox("Colormap", ["viridis", "plasma", "inferno", "hot", "jet", "turbo"])
+        interp_method = st.selectbox("Interpolation Method", ["linear", "cubic", "nearest"], index=0)
 
-    np.random.seed(42)
-    n_wells = 150
-    x_w = np.random.uniform(0, 15000, n_wells)
-    y_w = np.random.uniform(0, 15000, n_wells)
+    # Collect all points and values from uploaded BNA files
+    all_points = []
+    all_values = []
+    for f in uploaded_files:
+        contours = parse_bna(f)
+        for val, pts in contours:
+            for x, y in pts:
+                all_points.append([x, y])
+                all_values.append(val)
 
-    # Generate values
-    if dist == "Normal":
-        values = np.random.normal(0.5, 0.15, n_wells)
-    elif dist == "Lognormal":
-        values = lognorm.rvs(s=0.5, scale=0.4, size=n_wells)
-    else:
-        values = np.random.uniform(0, 1, n_wells)
+    if not all_points:
+        st.error("No valid points found in uploaded BNA files.")
+        st.stop()
 
-    # Clip to [0,1] for consistency
-    values = np.clip(values, 0, 1)
+    points = np.array(all_points)
+    values = np.array(all_values)
 
-    # Variogram length
-    corr_len = {"Smooth": 6000, "Short": 1500, "Long": 12000}[vario]
+    min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
+    min_y, max_y = np.min(points[:, 1]), np.max(points[:, 1])
 
-    # Grid
-    grid_x, grid_y = np.mgrid[0:15000:res*1j, 0:15000:res*1j]
-    points = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+    # Create grid
+    grid_x, grid_y = np.mgrid[min_x:max_x:res*1j, min_y:max_y:res*1j]
 
-    # Distance + exponential weights
-    dists = np.sqrt((x_w[None,:] - points[:,0,None])**2 + (y_w[None,:] - points[:,1,None])**2)
-    weights = np.exp(-dists / corr_len)
-    weights /= weights.sum(axis=1, keepdims=True)
-    grid_z = np.dot(weights, values).reshape(grid_x.shape)
+    # Interpolate
+    grid_z = griddata(points, values, (grid_x, grid_y), method=interp_method)
+
+    # Handle NaNs if any (e.g., fill with mean or clip)
+    grid_z = np.nan_to_num(grid_z, nan=np.nanmean(grid_z))
 
     # AUTO vmin/vmax from data
-    vmin, vmax = grid_z.min(), grid_z.max()
+    vmin, vmax = np.nanmin(grid_z), np.nanmax(grid_z)
 
     fig, ax = plt.subplots(figsize=(12, 10), dpi=150)
-    im = ax.imshow(grid_z, extent=[0,15000,0,15000], origin='lower',
+    im = ax.imshow(grid_z, extent=[min_x, max_x, min_y, max_y], origin='lower',
                    cmap=cmap, vmin=vmin, vmax=vmax)
     ax.set_title(chart_title)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_aspect('equal')
-
     cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-    cbar.set_label("Property Value")
-
+    cbar.set_label("Interpolated Value")
     plt.tight_layout()
     st.pyplot(fig)
 
