@@ -267,53 +267,110 @@ elif mode == "Overlay Contours":
 # 4. HEATMAP – AUTO color scale from data min/max
 # ==================================================================
 else:  # Heatmap
+    # ---------- Sidebar controls ----------
     with st.sidebar:
-        st.subheader("Grid")
-        res = st.slider("Resolution", 50, 500, 200, 25)
-        cmap = st.selectbox("Colormap", ["viridis", "plasma", "inferno", "hot", "jet", "turbo"])
-        interp_method = st.selectbox("Interpolation Method", ["linear", "cubic", "nearest"], index=0)
+        st.subheader("Data source")
+        use_real = st.checkbox("Use real contour points (recommended)", value=True)
 
-    # Collect all points and values from uploaded BNA files
-    all_points = []
-    all_values = []
+        if not use_real:
+            st.subheader("Distribution")
+            dist = st.selectbox("Type", ["Normal", "Lognormal", "Uniform"], key="dist")
+            st.subheader("Variogram")
+            vario = st.selectbox("Behavior", ["Smooth", "Short", "Long"], key="vario")
+
+        st.subheader("Grid")
+        res = st.slider("Resolution (cells)", 50, 500, 200, 25, key="res")
+        cmap = st.selectbox("Colormap",
+                            ["viridis", "plasma", "inferno", "hot", "jet", "turbo"],
+                            key="cmap")
+        interp_method = st.selectbox("Interpolation (real data)",
+                                    ["linear", "cubic", "nearest"],
+                                    index=0, key="interp")
+
+    # ---------- 1. Gather points from BNA files ----------
+    raw_points = []
+    raw_values = []
     for f in uploaded_files:
         contours = parse_bna(f)
         for val, pts in contours:
             for x, y in pts:
-                all_points.append([x, y])
-                all_values.append(val)
+                raw_points.append([x, y])
+                raw_values.append(val)
 
-    if not all_points:
-        st.error("No valid points found in uploaded BNA files.")
+    if not raw_points:
+        st.error("No contour points found in the uploaded BNA files.")
         st.stop()
 
-    points = np.array(all_points)
-    values = np.array(all_values)
+    points = np.array(raw_points)
+    values = np.array(raw_values)
 
-    min_x, max_x = np.min(points[:, 0]), np.max(points[:, 0])
-    min_y, max_y = np.min(points[:, 1]), np.max(points[:, 1])
+    # ---------- 2. Grid extent ----------
+    min_x, max_x = points[:, 0].min(), points[:, 0].max()
+    min_y, max_y = points[:, 1].min(), points[:, 1].max()
+    margin = 0.05 * max(max_x - min_x, max_y - min_y)   # 5 % padding
+    min_x, max_x = min_x - margin, max_x + margin
+    min_y, max_y = min_y - margin, max_y + margin
 
-    # Create grid
     grid_x, grid_y = np.mgrid[min_x:max_x:res*1j, min_y:max_y:res*1j]
+    grid_shape = grid_x.shape
 
-    # Interpolate
-    grid_z = griddata(points, values, (grid_x, grid_y), method=interp_method)
+    # ---------- 3. Interpolate / Simulate ----------
+    if use_real:
+        # ---- Direct interpolation (griddata) ----
+        grid_z = griddata(points, values, (grid_x, grid_y),
+                          method=interp_method)
+        grid_z = np.nan_to_num(grid_z, nan=np.nanmean(grid_z))
+        title_suffix = " (real contours)"
+    else:
+        # ---- Simulate a field that honours the variogram ----
+        # 1) pick a few “seed” points from the real data (or random)
+        n_seeds = min(200, len(points))
+        idx = np.random.choice(len(points), n_seeds, replace=False)
+        seed_pts = points[idx]
+        seed_val = values[idx]
 
-    # Handle NaNs if any (e.g., fill with mean or clip)
-    grid_z = np.nan_to_num(grid_z, nan=np.nanmean(grid_z))
+        # 2) variogram length
+        corr_len = {"Smooth": 0.30, "Short": 0.08, "Long": 0.60}[vario]
+        corr_len = corr_len * max(max_x - min_x, max_y - min_y)
 
-    # AUTO vmin/vmax from data
+        # 3) generate values according to chosen distribution
+        if dist == "Normal":
+            sim_vals = np.random.normal(loc=seed_val.mean(),
+                                        scale=seed_val.std(),
+                                        size=n_seeds)
+        elif dist == "Lognormal":
+            s = np.log(seed_val[seed_val > 0]).std()
+            mu = np.log(seed_val[seed_val > 0]).mean()
+            sim_vals = np.exp(np.random.normal(mu, s, n_seeds))
+        else:  # Uniform
+            sim_vals = np.random.uniform(seed_val.min(),
+                                         seed_val.max(),
+                                         n_seeds)
+
+        # 4) exponential weighting (simple IDW-like kriging)
+        grid_pts = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+        dists = np.sqrt(((seed_pts[None, :, :] - grid_pts[:, None, :]) ** 2).sum(-1))
+        weights = np.exp(-dists / corr_len)
+        weights /= weights.sum(axis=1, keepdims=True) + 1e-12
+        grid_z = (weights * sim_vals[None, :]).sum(axis=1)
+        grid_z = grid_z.reshape(grid_shape)
+        title_suffix = f" (simulated – {dist} / {vario})"
+
+    # ---------- 4. Plot ----------
     vmin, vmax = np.nanmin(grid_z), np.nanmax(grid_z)
 
     fig, ax = plt.subplots(figsize=(12, 10), dpi=150)
-    im = ax.imshow(grid_z, extent=[min_x, max_x, min_y, max_y], origin='lower',
-                   cmap=cmap, vmin=vmin, vmax=vmax)
-    ax.set_title(chart_title)
+    im = ax.imshow(grid_z,
+                   extent=[min_x, max_x, min_y, max_y],
+                   origin='lower',
+                   cmap=cmap,
+                   vmin=vmin, vmax=vmax)
+    ax.set_title(chart_title + title_suffix)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
-    ax.set_aspect('equal')
+    ax.set_aspect('_ensure_equal(ax)   # keep square pixels
     cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-    cbar.set_label("Interpolated Value")
+    cbar.set_label("Value")
     plt.tight_layout()
     st.pyplot(fig)
 
