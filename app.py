@@ -307,7 +307,7 @@ else:  # Heatmap
     # ---------- 2. Grid extent ----------
     min_x, max_x = points[:, 0].min(), points[:, 0].max()
     min_y, max_y = points[:, 1].min(), points[:, 1].max()
-    margin = 0.05 * max(max_x - min_x, max_y - min_y)   # 5 % padding
+    margin = 0.05 * max(max_x - min_x, max_y - min_y)   # 5% padding
     min_x, max_x = min_x - margin, max_x + margin
     min_y, max_y = min_y - margin, max_y + margin
 
@@ -323,31 +323,31 @@ else:  # Heatmap
         title_suffix = " (real contours)"
     else:
         # ---- Simulate a field that honours the variogram ----
-        # 1) pick a few “seed” points from the real data (or random)
         n_seeds = min(200, len(points))
         idx = np.random.choice(len(points), n_seeds, replace=False)
         seed_pts = points[idx]
         seed_val = values[idx]
 
-        # 2) variogram length
+        # variogram length
         corr_len = {"Smooth": 0.30, "Short": 0.08, "Long": 0.60}[vario]
         corr_len = corr_len * max(max_x - min_x, max_y - min_y)
 
-        # 3) generate values according to chosen distribution
+        # generate values
         if dist == "Normal":
             sim_vals = np.random.normal(loc=seed_val.mean(),
-                                        scale=seed_val.std(),
+                                        scale=seed_val.std() or 1.0,
                                         size=n_seeds)
         elif dist == "Lognormal":
-            s = np.log(seed_val[seed_val > 0]).std()
-            mu = np.log(seed_val[seed_val > 0]).mean()
+            positive = seed_val[seed_val > 0]
+            if len(positive) == 0:
+                positive = np.array([1.0])
+            s = np.log(positive).std()
+            mu = np.log(positive).mean()
             sim_vals = np.exp(np.random.normal(mu, s, n_seeds))
         else:  # Uniform
-            sim_vals = np.random.uniform(seed_val.min(),
-                                         seed_val.max(),
-                                         n_seeds)
+            sim_vals = np.random.uniform(seed_val.min(), seed_val.max(), n_seeds)
 
-        # 4) exponential weighting (simple IDW-like kriging)
+        # exponential weighting (IDW-like)
         grid_pts = np.column_stack((grid_x.ravel(), grid_y.ravel()))
         dists = np.sqrt(((seed_pts[None, :, :] - grid_pts[:, None, :]) ** 2).sum(-1))
         weights = np.exp(-dists / corr_len)
@@ -368,12 +368,11 @@ else:  # Heatmap
     ax.set_title(chart_title + title_suffix)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
-    ax.set_aspect('_ensure_equal(ax)   # keep square pixels
+    ax.set_aspect('equal')  # Fixed: was broken before
     cbar = plt.colorbar(im, ax=ax, shrink=0.8)
     cbar.set_label("Value")
     plt.tight_layout()
     st.pyplot(fig)
-
 # ==================================================================
 # PNG Download
 # ==================================================================
