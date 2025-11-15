@@ -1,5 +1,5 @@
 # -------------------------------------------------
-# BNA Reservoir Visualizer – FINAL (No Variograms)
+# BNA Reservoir Visualizer – FINAL FIXED
 # -------------------------------------------------
 import streamlit as st
 import matplotlib.pyplot as plt
@@ -14,15 +14,15 @@ import io
 # ========================================
 st.set_page_config(page_title="BNA Reservoir Visualizer", layout="wide")
 st.title("BNA Reservoir Contour Analyzer")
-st.markdown("Upload `.bna` files → Heatmaps & Contours → Download")
+st.markdown("Upload `.bna` files → Heatmaps, Contours, Histograms → Download")
 
 # ========================================
-# MAP TYPES (NO VARIOGRAMS)
+# MAP TYPES
 # ========================================
 MAP_TYPES = [
     "Structure Map",
     "Thickness Map",
-    "Property Heatmap",        # <-- imshow() with (dist, variogram)
+    "Property Heatmap",
     "Histogram",
     "Overlay: Structure + Thickness"
 ]
@@ -97,7 +97,7 @@ def add_scale_bar(ax, length=2000):
     ax.text((x0 + x1)/2, y0 + 0.02, f"{length/1000:.0f} km", ha="center",
             va="bottom", transform=ax.transAxes, fontsize=10, fontweight="bold")
 
-# ---------- STRUCTURE / THICKNESS CONTOUR ----------
+# ---------- CONTOUR MAP (STRUCTURE / THICKNESS) ----------
 def plot_contour_map(ax, df, title, xlabel, ylabel, unit, levels, cmap):
     x, y, z = df["x"], df["y"], df["z"]
     xi = np.linspace(x.min(), x.max(), 500)
@@ -120,7 +120,7 @@ def plot_contour_map(ax, df, title, xlabel, ylabel, unit, levels, cmap):
     add_north_arrow(ax)
     add_scale_bar(ax)
 
-# ---------- PROPERTY HEATMAP (imshow) ----------
+# ---------- PROPERTY HEATMAP ----------
 def plot_property_heatmap(ax, df, title, xlabel, ylabel, unit, cmap, distribution, vario_type):
     x, y, z = df["x"], df["y"], df["z"]
     xi = np.linspace(x.min(), x.max(), 500)
@@ -134,7 +134,6 @@ def plot_property_heatmap(ax, df, title, xlabel, ylabel, unit, cmap, distributio
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label(f"{title} [{unit}]" if unit else title)
 
-    # Title with (distribution, variogram)
     full_title = f"{title} ({distribution}, {vario_type.lower()} variogram)"
     ax.set_title(full_title, fontweight="bold")
 
@@ -143,34 +142,38 @@ def plot_property_heatmap(ax, df, title, xlabel, ylabel, unit, cmap, distributio
     add_north_arrow(ax)
     add_scale_bar(ax)
 
-# ---------- HISTOGRAM ----------
-def plot_histogram(ax, df, title, unit, bins):
+# ---------- HISTOGRAM (FIXED) ----------
+def plot_histogram(ax, df, title, xlabel, ylabel, unit, bins):
     values = df["z"].dropna()
     if values.empty:
         ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center")
         ax.set_title(title)
         return
 
-    counts, edges = np.histogram(values, bins=bins)
-    percentages = 100.0 * counts / counts.sum()
+    # Use exact bin edges
+    hist, edges = np.histogram(values, bins=bins)
+    percentages = 100.0 * hist / hist.sum()
     width = np.diff(edges)
     centers = (edges[:-1] + edges[1:]) / 2
 
+    # Smart color
     name = title.lower()
     if "porosity" in name:
-        color = "#1f77b4"  # blue
+        color = "#1f77b4"
     elif "permeability" in name or "perm" in name:
-        color = "#d62728"  # red
+        color = "#d62728"
     elif "net" in name or "ntg" in name:
-        color = "#2ca02c"  # green
+        color = "#2ca02c"
     elif "thickness" in name:
-        color = "#ff7f0e"  # orange
+        color = "#ff7f0e"
     else:
-        color = "#9467bd"  # purple
+        color = "#9467bd"
 
     ax.bar(centers, percentages, width=width, edgecolor="black", color=color, alpha=0.8)
-    ax.set_xlabel(f"{title} [{unit}]" if unit else title)
-    ax.set_ylabel("Frequency (%)")
+    
+    # Use user-defined X/Y labels
+    ax.set_xlabel(f"{xlabel} [{unit}]" if unit else xlabel)
+    ax.set_ylabel(ylabel)  # e.g. "Frequency (%)"
     ax.set_title(title, fontweight="bold")
     ax.set_yticks(np.linspace(0, 100, 6))
     ax.set_yticklabels([f"{int(t)}%" for t in np.linspace(0, 100, 6)])
@@ -182,12 +185,10 @@ def plot_overlay(ax, struct_df, thick_df):
     yi = np.linspace(thick_df["y"].min(), thick_df["y"].max(), 500)
     Xi, Yi = np.meshgrid(xi, yi)
 
-    # Thickness fill
     Zi_thick = griddata((thick_df["x"], thick_df["y"]), thick_df["z"], (Xi, Yi), method="linear")
     cf = ax.contourf(Xi, Yi, Zi_thick, levels=15, cmap="Blues", alpha=0.7)
     plt.colorbar(cf, ax=ax, label="Thickness [m]")
 
-    # Structure contours
     Zi_struct = griddata((struct_df["x"], struct_df["y"]), struct_df["z"], (Xi, Yi), method="linear")
     cs = ax.contour(Xi, Yi, Zi_struct, levels=np.arange(3700, 4100, 20), colors="red", linewidths=1.2)
     ax.clabel(cs, inline=True, fontsize=9, fmt="%d")
@@ -219,9 +220,13 @@ for fname in all_contours.keys():
         default_title = os.path.splitext(fname)[0].replace("_", " ")
         title = st.text_input("Title", value=default_title, key=f"t_{fname}")
         map_type = st.selectbox("Map Type", MAP_TYPES, key=f"mt_{fname}")
+        
+        # X/Y labels now fully customizable
         xlabel = st.text_input("X Label", value="X (m)", key=f"xl_{fname}")
         ylabel = st.text_input("Y Label", value="Y (m)", key=f"yl_{fname}")
-        unit = st.text_input("Unit", value="", key=f"u_{fname}")
+        
+        # Unit
+        unit = st.text_input("Unit", value="mD" if "perm" in fname.lower() else "", key=f"u_{fname}")
 
         # Contour maps
         if map_type in ["Structure Map", "Thickness Map"]:
@@ -243,9 +248,11 @@ for fname in all_contours.keys():
 
         # Histogram
         if map_type == "Histogram":
-            bins = st.slider("Bins", 5, 100, 30, key=f"bins_{fname}")
+            bins = st.slider("Number of Bins", 5, 100, 30, key=f"bins_{fname}")
+            hist_ylabel = st.text_input("Y Label (Histogram)", value="Frequency (%)", key=f"hy_{fname}")
         else:
             bins = 30
+            hist_ylabel = "Frequency (%)"
 
         config[fname] = {
             "title": title,
@@ -258,6 +265,7 @@ for fname in all_contours.keys():
             "distribution": distribution,
             "vario_type": vario_type,
             "bins": bins,
+            "hist_ylabel": hist_ylabel,
         }
 
 # ========================================
@@ -279,7 +287,8 @@ if plot_mode == "Single File":
         plot_property_heatmap(ax, df, cfg["title"], cfg["xlabel"], cfg["ylabel"],
                               cfg["unit"], cfg["cmap"], cfg["distribution"], cfg["vario_type"])
     elif mt == "Histogram":
-        plot_histogram(ax, df, cfg["title"], cfg["unit"], cfg["bins"])
+        plot_histogram(ax, df, cfg["title"], cfg["xlabel"], cfg["hist_ylabel"],
+                       cfg["unit"], cfg["bins"])
     elif mt == "Overlay: Structure + Thickness":
         s_file = next((f for f in all_contours if "struct" in f.lower()), None)
         t_file = next((f for f in all_contours if "thick" in f.lower()), None)
@@ -290,14 +299,13 @@ if plot_mode == "Single File":
     plt.tight_layout()
     st.pyplot(fig)
 
-    # Export PNG
+    # Export
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
     buf.seek(0)
     st.download_button("Download PNG", buf, f"{cfg['title']}.png", "image/png")
 
-    # Export Grid CSV
-    if st.checkbox("Export Interpolated Grid (CSV)"):
+    if st.checkbox("Export Grid CSV"):
         xi = np.linspace(df["x"].min(), df["x"].max(), 500)
         yi = np.linspace(df["y"].min(), df["y"].max(), 500)
         Xi, Yi = np.meshgrid(xi, yi)
@@ -322,7 +330,8 @@ else:  # Batch
                 plot_property_heatmap(ax, df, cfg["title"], cfg["xlabel"], cfg["ylabel"],
                                       cfg["unit"], cfg["cmap"], cfg["distribution"], cfg["vario_type"])
             elif mt == "Histogram":
-                plot_histogram(ax, df, cfg["title"], cfg["unit"], cfg["bins"])
+                plot_histogram(ax, df, cfg["title"], cfg["xlabel"], cfg["hist_ylabel"],
+                               cfg["unit"], cfg["bins"])
             plt.tight_layout()
             figs.append((cfg["title"], fig))
 
