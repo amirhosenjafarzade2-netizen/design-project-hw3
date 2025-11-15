@@ -1,246 +1,204 @@
-import sys
-import pandas as pd
+import streamlit as st
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout,
-    QWidget, QFileDialog, QLabel, QLineEdit, QSpinBox, QGroupBox,
-    QFormLayout, QMessageBox, QSplitter, QComboBox, QTextEdit
+import numpy as np
+import pandas as pd
+from io import StringIO
+import re
+
+# ===========================
+# App Title
+# ===========================
+st.set_page_config(page_title="BNA Contour Histogram Analyzer", layout="wide")
+st.title("🗺️ BNA Contour Histogram Analyzer")
+st.markdown("""
+Upload `.bna` contour files (e.g., Porosity, Permeability, NTG, Thickness, etc.)  
+and generate customizable high-resolution histograms.
+""")
+
+# ===========================
+# File Uploader
+# ===========================
+uploaded_files = st.file_uploader(
+    "Upload BNA Files",
+    type=["bna"],
+    accept_multiple_files=True,
+    help="Upload one or more .bna contour files"
 )
-from PyQt5.QtCore import Qt
 
+if not uploaded_files:
+    st.info("Please upload at least one .bna file to begin.")
+    st.stop()
 
-class BNAMultiBlockApp(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("BNA Multi-Block Histogram Analyzer")
-        self.setGeometry(100, 100, 1350, 800)
+# ===========================
+# Parse BNA Files
+# ===========================
+def parse_bna(file_obj):
+    content = file_obj.read().decode("utf-8", errors="ignore")
+    lines = content.splitlines()
+    
+    contours = {}
+    current_label = None
+    current_points = []
 
-        self.blocks = []  # List of DataFrames: each block is {'name': str, 'data': pd.DataFrame}
-        self.init_ui()
-
-    def init_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QHBoxLayout(central)
-
-        # === LEFT PANEL ===
-        controls = QGroupBox("Controls")
-        ctrl_layout = QVBoxLayout()
-
-        # Upload
-        upload_btn = QPushButton("Upload .bna File")
-        upload_btn.clicked.connect(self.load_bna)
-        ctrl_layout.addWidget(upload_btn)
-
-        self.file_label = QLabel("No file loaded")
-        self.file_label.setWordWrap(True)
-        ctrl_layout.addWidget(self.file_label)
-
-        # Block selector
-        block_group = QGroupBox("Select Data Block")
-        block_layout = QFormLayout()
-        self.block_combo = QComboBox()
-        block_layout.addRow("Block:", self.block_combo)
-        block_group.setLayout(block_layout)
-        ctrl_layout.addWidget(block_group)
-
-        # Column selector (X or Y)
-        col_group = QGroupBox("Data Column to Histogram")
-        col_layout = QFormLayout()
-        self.col_combo = QComboBox()
-        self.col_combo.addItems(["Y (Value)", "X (Depth)"])
-        col_layout.addRow("Plot:", self.col_combo)
-        col_group.setLayout(col_layout)
-        ctrl_layout.addWidget(col_group)
-
-        # Chart title
-        title_group = QGroupBox("Chart Title")
-        t_layout = QFormLayout()
-        self.chart_title = QLineEdit("BNA Block Histogram")
-        t_layout.addRow("Title:", self.chart_title)
-        title_group.setLayout(t_layout)
-        ctrl_layout.addWidget(title_group)
-
-        # Bins
-        bin_group = QGroupBox("Bins")
-        b_layout = QFormLayout()
-        self.bins_spin = QSpinBox()
-        self.bins_spin.setRange(5, 200)
-        self.bins_spin.setValue(30)
-        b_layout.addRow("Bins:", self.bins_spin)
-        bin_group.setLayout(b_layout)
-        ctrl_layout.addWidget(bin_group)
-
-        # Axis labels
-        axis_group = QGroupBox("Axis Labels")
-        a_layout = QFormLayout()
-        self.x_label = QLineEdit("Value")
-        self.y_label = QLineEdit("Frequency")
-        a_layout.addRow("X Label:", self.x_label)
-        a_layout.addRow("Y Label:", self.y_label)
-        axis_group.setLayout(a_layout)
-        ctrl_layout.addWidget(axis_group)
-
-        # X limits
-        limit_group = QGroupBox("X-Axis Limits (auto if blank)")
-        l_layout = QFormLayout()
-        self.x_min = QLineEdit()
-        self.x_max = QLineEdit()
-        l_layout.addRow("Min:", self.x_min)
-        l_layout.addRow("Max:", self.x_max)
-        limit_group.setLayout(l_layout)
-        ctrl_layout.addWidget(limit_group)
-
-        # Update
-        update_btn = QPushButton("Update Histogram")
-        update_btn.clicked.connect(self.update_plot)
-        update_btn.setStyleSheet("font-weight: bold; padding: 10px;")
-        ctrl_layout.addWidget(update_btn)
-
-        ctrl_layout.addStretch()
-        controls.setLayout(ctrl_layout)
-        controls.setMaximumWidth(380)
-
-        # === RIGHT PANEL: Plot + Preview ===
-        right_panel = QSplitter(Qt.Vertical)
-
-        # Plot
-        self.figure = plt.Figure(figsize=(12, 6), dpi=100)
-        self.canvas = FigureCanvas(self.figure)
-        right_panel.addWidget(self.canvas)
-
-        # Raw data preview
-        self.preview = QTextEdit()
-        self.preview.setMaximumHeight(200)
-        self.preview.setFontFamily("Courier")
-        self.preview.setReadOnly(True)
-        right_panel.addWidget(self.preview)
-
-        right_panel.setSizes([600, 200])
-
-        # Main layout
-        main_split = QSplitter(Qt.Horizontal)
-        main_split.addWidget(controls)
-        main_split.addWidget(right_panel)
-        main_split.setSizes([400, 950])
-        layout.addWidget(main_split)
-
-        # Style
-        self.setStyleSheet("""
-            QGroupBox { font-weight: bold; border: 1px solid #999; border-radius: 6px; margin-top: 10px; padding-top: 8px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 10px; top: -8px; background: white; padding: 0 5px; }
-            QLineEdit, QComboBox, QSpinBox { padding: 6px; border: 1px solid #ccc; border-radius: 4px; }
-            QPushButton { padding: 8px; border-radius: 4px; }
-        """)
-
-    def load_bna(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open BNA", "", "BNA Files (*.bna);;All Files (*)")
-        if not path:
-            return
-
-        try:
-            self.blocks = []
-            current_block = None
-            block_data = []
-
-            with open(path, 'r') as f:
-                lines = f.readlines()
-
-            preview_lines = []
-            for i, line in enumerate(lines):
-                line = line.strip()
-                if not line:
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith('"C"'):
+            # Save previous contour
+            if current_label is not None and current_points:
+                contours[current_label] = current_points.copy()
+            # Parse new contour
+            parts = line.split(',')
+            if len(parts) >= 3:
+                label = parts[1].strip('"')
+                try:
+                    value = float(parts[2])
+                except:
+                    value = label  # fallback
+                current_label = value
+                current_points = []
+        else:
+            # Parse X,Y coordinate
+            coords = re.split(r'[,;\s]+', line.strip())
+            if len(coords) >= 2:
+                try:
+                    x = float(coords[0])
+                    y = float(coords[1])
+                    current_points.append((x, y))
+                except:
                     continue
+    # Save last contour
+    if current_label is not None and current_points:
+        contours[current_label] = current_points
+    
+    return contours
 
-                if line.startswith('"C",'):
-                    # Save previous block
-                    if current_block and block_data:
-                        df = pd.DataFrame(block_data, columns=['X', 'Y'])
-                        self.blocks.append({'name': current_block, 'data': df})
-                        block_data = []
+# Extract all contour values (keys) from all files
+all_contour_values = []
+file_names = []
 
-                    parts = [p.strip('"') for p in line.split(',')]
-                    if len(parts) >= 3:
-                        current_block = f"Curve {parts[1]} (n={parts[2]})"
-                    else:
-                        current_block = f"Curve {len(self.blocks)+1}"
+for file in uploaded_files:
+    try:
+        contours = parse_bna(file)
+        values = [float(k) for k in contours.keys() if isinstance(k, (int, float)) or k.replace('.','').isdigit()]
+        all_contour_values.extend(values)
+        file_names.append(file.name)
+    except Exception as e:
+        st.error(f"Error parsing {file.name}: {e}")
 
-                else:
-                    parts = line.split(',')
-                    if len(parts) >= 2:
-                        try:
-                            x = float(parts[0])
-                            y = float(parts[1])
-                            block_data.append([x, y])
-                        except:
-                            continue
+if not all_contour_values:
+    st.error("No valid contour values found in uploaded files.")
+    st.stop()
 
-                if i < 50:
-                    preview_lines.append(line)
+# ===========================
+# Sidebar Controls
+# ===========================
+with st.sidebar:
+    st.header("📊 Histogram Settings")
+    
+    # Combine all data
+    data = np.array(all_contour_values)
+    
+    # Stats
+    st.metric("Total Contour Values", len(data))
+    st.metric("Min", f"{data.min():.4f}")
+    st.metric("Max", f"{data.max():.4f}")
+    st.metric("Mean", f"{data.mean():.4f}")
+    
+    st.markdown("---")
+    
+    # User inputs
+    num_bins = st.slider("Number of Bins", min_value=5, max_value=200, value=50, step=5)
+    
+    chart_title = st.text_input("Chart Title", value="Histogram of Contour Values")
+    
+    x_label = st.text_input("X-Axis Label", value="Contour Value")
+    y_label = st.text_input("Y-Axis Label", value="Frequency")
+    
+    # Manual axis limits
+    col1, col2 = st.columns(2)
+    with col1:
+        x_min = st.number_input("X Min", value=float(data.min()), format="%.6f")
+        y_min = st.number_input("Y Min", value=0.0)
+    with col2:
+        x_max = st.number_input("X Max", value=float(data.max()), format="%.6f")
+        y_max_auto = st.checkbox("Y Max Auto", value=True)
+        y_max = st.number_input("Y Max", value=float(data.max()), disabled=y_max_auto)
 
-            # Save last block
-            if current_block and block_data:
-                df = pd.DataFrame(block_data, columns=['X', 'Y'])
-                self.blocks.append({'name': current_block, 'data': df})
+# ===========================
+# Plot Histogram
+# ===========================
+fig, ax = plt.subplots(figsize=(12, 7), dpi=150)
 
-            if not self.blocks:
-                raise ValueError("No valid data blocks found.")
+# Histogram
+n, bins, patches = ax.hist(
+    data,
+    bins=num_bins,
+    color='#4C72B0',
+    edgecolor='black',
+    alpha=0.8,
+    linewidth=0.8
+)
 
-            # Update UI
-            self.block_combo.clear()
-            for b in self.blocks:
-                self.block_combo.addItem(b['name'])
+# Styling
+ax.set_title(chart_title, fontsize=16, fontweight='bold', pad=20)
+ax.set_xlabel(x_label, fontsize=14)
+ax.set_ylabel(y_label, fontsize=14)
+ax.grid(True, alpha=0.3, linestyle='--')
+ax.set_axisbelow(True)
 
-            self.file_label.setText(f"<b>{path.split('/')[-1]}</b><br>{len(self.blocks)} blocks, {sum(len(b['data']) for b in self.blocks)} points")
-            self.preview.setText("\n".join(preview_lines[-50:]))
+# Set axis limits
+ax.set_xlim(x_min, x_max)
+if y_max_auto:
+    ax.set_ylim(0, None)
+else:
+    ax.set_ylim(y_min, y_max)
 
-            self.update_plot()
+# Add value labels on top of bars
+for rect in patches:
+    height = rect.get_height()
+    if height > 0:
+        ax.annotate(f'{int(height)}',
+                    xy=(rect.get_x() + rect.get_width() / 2, height),
+                    xytext=(0, 5),
+                    textcoords="offset points",
+                    ha='center', va='bottom',
+                    fontsize=9, color='black')
 
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load:\n{e}")
+# Tight layout
+plt.tight_layout()
 
-    def update_plot(self):
-        if not self.blocks:
-            return
+# ===========================
+# Display Plot
+# ===========================
+st.pyplot(fig)
 
-        idx = self.block_combo.currentIndex()
-        block = self.blocks[idx]
-        data = block['data']
+# ===========================
+# Data Table (Optional)
+# ===========================
+with st.expander("📋 View Raw Contour Values"):
+    df = pd.DataFrame({
+        "Value": all_contour_values,
+        "Source File": [f for f in file_names for _ in range(len([v for v in parse_bna(uploaded_files[file_names.index(f)]).keys() if isinstance(v, (int,float)) or str(v).replace('.','').isdigit()]))]
+    })
+    st.dataframe(df.sort_values("Value"), use_container_width=True)
 
-        col = self.col_combo.currentText()
-        values = data['Y'] if col.startswith("Y") else data['X']
-        values = values.dropna()
+# ===========================
+# Download Plot
+# ===========================
+buf = plt.gcf().canvas.tostring_rgb()
+import io
+img_bytes = io.BytesIO()
+fig.savefig(img_bytes, format='png', dpi=200, bbox_inches='tight')
+img_bytes.seek(0)
 
-        bins = self.bins_spin.value()
-        self.figure.clear()
-        ax = self.figure.add_subplot(111)
+st.download_button(
+    label="📥 Download Plot as PNG",
+    data=img_bytes,
+    file_name="histogram.png",
+    mime="image/png"
+)
 
-        # X limits
-        try:
-            xmin = float(self.x_min.text()) if self.x_min.text().strip() else None
-            xmax = float(self.x_max.text()) if self.x_max.text().strip() else None
-            range_val = (xmin, xmax) if xmin and xmax else None
-        except:
-            range_val = None
-
-        ax.hist(values, bins=bins, color='#1f77b4', edgecolor='black', alpha=0.85, range=range_val)
-        ax.set_title(block['name'], fontsize=14, fontweight='bold')
-        ax.set_xlabel(self.x_label.text())
-        ax.set_ylabel(self.y_label.text())
-        ax.grid(True, alpha=0.3)
-
-        main_title = self.chart_title.text().strip()
-        if main_title:
-            self.figure.suptitle(main_title, fontsize=16, fontweight='bold', y=0.98)
-
-        self.figure.tight_layout(rect=[0, 0, 1, 0.94])
-        self.canvas.draw()
-
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-    win = BNAMultiBlockApp()
-    win.show()
-    sys.exit(app.exec_())
+# Close plot to free memory
+plt.close(fig)
