@@ -172,7 +172,7 @@ elif mode == "Contour Map":
                 angle = 0
             ax.text(xs[mid], ys[mid], f"{val:.6g}", fontsize=label_size,
                     ha="center", va="center", rotation=angle,
-                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="none", alpha=0.8))
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.8))
 
     ax.set_title(chart_title)
     ax.set_xlabel(x_label)
