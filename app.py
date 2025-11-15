@@ -8,12 +8,12 @@ import io
 # ===========================
 # Page Setup
 # ===========================
-st.set_page_config(page_title="BNA Histogram (Fixed Frequency)", layout="wide")
-st.title("BNA Contour Histogram – Correct Frequency")
+st.set_page_config(page_title="BNA Histogram (Clean)", layout="wide")
+st.title("BNA Contour Histogram – Clean & Accurate")
 st.markdown("""
 **Upload `.bna` files** → **X-axis = Parameter Value** (e.g., `0.15`, `200.0`)  
-**Y-axis = Frequency = Number of Contour Lines** (each `"C",…` = 1 count)  
-Fully customizable, high-res, matches your original plots.
+**Y-axis = Frequency (Number of Contours)**  
+**No bar labels** – clean, professional look.
 """)
 
 # ===========================
@@ -31,43 +31,35 @@ if not uploaded_files:
     st.stop()
 
 # ===========================
-# BNA Parser – Count Each Contour Once
+# Parse BNA – Extract Parameter Values Only
 # ===========================
-def parse_bna_contour_values(file_obj):
-    """
-    Reads .bna file and returns:
-    - list of parameter values (second field in "C",...)
-    - filename
-    Ignores coordinates – we only need the contour label.
-    """
+def extract_contour_values(file_obj):
+    """Return list of float values from second field in "C",... lines."""
     content = file_obj.read().decode("utf-8", errors="ignore")
     lines = content.splitlines()
-
     values = []
+
     for line in lines:
         line = line.strip()
-        if not line:
-            continue
         if line.startswith('"C"'):
             parts = [p.strip('"') for p in line.split(",")]
             if len(parts) >= 3:
-                label = parts[1]  # e.g., "0.150"
                 try:
-                    val = float(label)
+                    val = float(parts[1])  # Parameter label
                     values.append(val)
                 except ValueError:
-                    continue  # skip non-numeric labels
+                    continue
     return values
 
 # ===========================
-# Collect All Values + Source File
+# Collect Data
 # ===========================
 all_values = []
-value_file_pairs = []  # (value, filename)
+value_file_pairs = []
 
 for up_file in uploaded_files:
     try:
-        vals = parse_bna_contour_values(up_file)
+        vals = extract_contour_values(up_file)
         for v in vals:
             all_values.append(v)
             value_file_pairs.append((v, up_file.name))
@@ -75,7 +67,7 @@ for up_file in uploaded_files:
         st.error(f"Error reading **{up_file.name}**: {e}")
 
 if not all_values:
-    st.error("No valid numeric contour values found.")
+    st.error("No numeric contour values found.")
     st.stop()
 
 data = np.array(all_values)
@@ -99,7 +91,7 @@ with st.sidebar:
     num_bins = st.slider("Number of Bins", 5, 200, 50, 5)
     chart_title = st.text_input("Chart Title", "Histogram of Contour Values")
     x_label = st.text_input("X-Axis Label", "Parameter Value")
-    y_label = st.text_input("Y-Axis Label", "Frequency (Number of Contours)")
+    y_label = st.text_input("Y-Axis Label", "Frequency")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -108,15 +100,17 @@ with st.sidebar:
     with col2:
         x_max = st.number_input("X Max", value=float(data.max()), format="%.6g")
         y_auto = st.checkbox("Y Max Auto", value=True)
-        y_max = st.number_input("Y Max", value=float(int(data.max()) + 1), disabled=y_auto)
+        y_max = st.number_input("Y Max", value=10.0, disabled=y_auto)
 
 # ===========================
-# Plot Histogram – Correct Frequency
+# Plot – Clean, No Bar Labels
 # ===========================
 fig, ax = plt.subplots(figsize=(12, 7), dpi=150)
 
-# Use 'bins' as edges → frequency = count per bin
+# Compute histogram
 counts, bin_edges = np.histogram(data, bins=num_bins, range=(x_min, x_max))
+
+# Draw bars
 ax.bar(
     bin_edges[:-1],
     counts,
@@ -134,24 +128,9 @@ ax.set_ylabel(y_label, fontsize=14)
 ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.7)
 ax.set_axisbelow(True)
 
+# Axis limits
 ax.set_xlim(x_min, x_max)
 ax.set_ylim(y_min, None if y_auto else y_max)
-
-# Add frequency labels on top of bars
-for i, count in enumerate(counts):
-    if count > 0:
-        x_pos = bin_edges[i] + (bin_edges[i+1] - bin_edges[i]) / 2
-        ax.annotate(
-            f"{int(count)}",
-            xy=(x_pos, count),
-            xytext=(0, 5),
-            textcoords="offset points",
-            ha="center",
-            va="bottom",
-            fontsize=9,
-            fontweight="bold",
-            color="black"
-        )
 
 plt.tight_layout()
 st.pyplot(fig)
@@ -159,7 +138,7 @@ st.pyplot(fig)
 # ===========================
 # Data Table
 # ===========================
-with st.expander("Raw Contour Values (One Row = One Contour Line)"):
+with st.expander("Raw Contour Values"):
     df = pd.DataFrame(value_file_pairs, columns=["Value", "Source File"])
     df = df.sort_values("Value").reset_index(drop=True)
     st.dataframe(df, use_container_width=True)
@@ -175,7 +154,7 @@ buf.seek(0)
 st.download_button(
     label="Download Plot as PNG",
     data=buf,
-    file_name="contour_histogram_correct_frequency.png",
+    file_name="contour_histogram_clean.png",
     mime="image/png"
 )
 
@@ -184,4 +163,4 @@ plt.close(fig)
 # ===========================
 # Footer
 # ===========================
-st.caption("Fixed: Frequency = Number of Contour Lines | X-axis = Parameter Label | Streamlit + Matplotlib")
+st.caption("Clean histogram • No bar labels • Accurate frequency • Streamlit + Matplotlib")
