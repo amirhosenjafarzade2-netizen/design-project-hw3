@@ -1,12 +1,11 @@
 # -------------------------------------------------
-# BNA Reservoir Visualizer – FINAL VERSION
+# BNA Reservoir Visualizer – FINAL (No Variograms)
 # -------------------------------------------------
 import streamlit as st
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.interpolate import griddata
-from scipy.spatial.distance import pdist, squareform
 import os
 import io
 
@@ -15,24 +14,21 @@ import io
 # ========================================
 st.set_page_config(page_title="BNA Reservoir Visualizer", layout="wide")
 st.title("BNA Reservoir Contour Analyzer")
-st.markdown("Upload any `.bna` files → Choose map type → Download PNG/CSV")
+st.markdown("Upload `.bna` files → Heatmaps & Contours → Download")
 
 # ========================================
-# MAP TYPES
+# MAP TYPES (NO VARIOGRAMS)
 # ========================================
 MAP_TYPES = [
     "Structure Map",
     "Thickness Map",
-    "Property Heatmap",           # Porosity / Perm / NTG
+    "Property Heatmap",        # <-- imshow() with (dist, variogram)
     "Histogram",
-    "Normal Variogram",
-    "Long/Short Directional Variogram",
-    "Variogram Heatmap",
     "Overlay: Structure + Thickness"
 ]
 
 DISTRIBUTIONS = ["Normal", "Lognormal", "Uniform"]
-VARIOGRAM_RANGES = ["Smooth", "Short", "Long"]
+VARIOGRAM_TYPES = ["Smooth", "Short", "Long"]
 
 # ========================================
 # PARSING .bna
@@ -102,7 +98,7 @@ def add_scale_bar(ax, length=2000):
             va="bottom", transform=ax.transAxes, fontsize=10, fontweight="bold")
 
 # ---------- STRUCTURE / THICKNESS CONTOUR ----------
-def plot_structure_or_thickness(ax, df, title, xlabel, ylabel, unit, levels, cmap):
+def plot_contour_map(ax, df, title, xlabel, ylabel, unit, levels, cmap):
     x, y, z = df["x"], df["y"], df["z"]
     xi = np.linspace(x.min(), x.max(), 500)
     yi = np.linspace(y.min(), y.max(), 500)
@@ -124,8 +120,8 @@ def plot_structure_or_thickness(ax, df, title, xlabel, ylabel, unit, levels, cma
     add_north_arrow(ax)
     add_scale_bar(ax)
 
-# ---------- PROPERTY HEATMAP (WITH SIMULATION TITLE) ----------
-def plot_property_heatmap(ax, df, title, xlabel, ylabel, unit, cmap, distribution, vario_range):
+# ---------- PROPERTY HEATMAP (imshow) ----------
+def plot_property_heatmap(ax, df, title, xlabel, ylabel, unit, cmap, distribution, vario_type):
     x, y, z = df["x"], df["y"], df["z"]
     xi = np.linspace(x.min(), x.max(), 500)
     yi = np.linspace(y.min(), y.max(), 500)
@@ -138,9 +134,9 @@ def plot_property_heatmap(ax, df, title, xlabel, ylabel, unit, cmap, distributio
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label(f"{title} [{unit}]" if unit else title)
 
-    # Add simulation info to title
-    sim_title = f"{title} ({distribution}, {vario_range.lower()} variogram)"
-    ax.set_title(sim_title, fontweight="bold")
+    # Title with (distribution, variogram)
+    full_title = f"{title} ({distribution}, {vario_type.lower()} variogram)"
+    ax.set_title(full_title, fontweight="bold")
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -162,15 +158,15 @@ def plot_histogram(ax, df, title, unit, bins):
 
     name = title.lower()
     if "porosity" in name:
-        color = "#1f77b4"
+        color = "#1f77b4"  # blue
     elif "permeability" in name or "perm" in name:
-        color = "#d62728"
+        color = "#d62728"  # red
     elif "net" in name or "ntg" in name:
-        color = "#2ca02c"
+        color = "#2ca02c"  # green
     elif "thickness" in name:
-        color = "#ff7f0e"
+        color = "#ff7f0e"  # orange
     else:
-        color = "#9467bd"
+        color = "#9467bd"  # purple
 
     ax.bar(centers, percentages, width=width, edgecolor="black", color=color, alpha=0.8)
     ax.set_xlabel(f"{title} [{unit}]" if unit else title)
@@ -179,72 +175,6 @@ def plot_histogram(ax, df, title, unit, bins):
     ax.set_yticks(np.linspace(0, 100, 6))
     ax.set_yticklabels([f"{int(t)}%" for t in np.linspace(0, 100, 6)])
     ax.grid(True, axis="y", alpha=0.3)
-
-# ---------- VARIOGRAM (LINE) ----------
-def compute_variogram(df, max_lag, n_lags, direction=None):
-    coords = df[["x", "y"]].values
-    z = df["z"].values
-    if direction is not None:
-        angle = np.radians(direction)
-        vec = np.array([np.cos(angle), np.sin(angle)])
-        proj = coords @ vec
-        order = np.argsort(proj)
-        proj, z = proj[order], z[order]
-        h = np.abs(np.subtract.outer(proj, proj))
-        dz = np.abs(np.subtract.outer(z, z))
-    else:
-        h = squareform(pdist(coords))
-        dz = np.abs(np.subtract.outer(z, z))
-
-    lags = np.linspace(0, max_lag, n_lags + 1)
-    gamma, centers = [], []
-    for i in range(n_lags):
-        mask = (h >= lags[i]) & (h < lags[i + 1])
-        if mask.sum() > 0:
-            gamma.append(0.5 * (dz[mask] ** 2).mean())
-            centers.append((lags[i] + lags[i + 1]) / 2)
-    return np.array(centers), np.array(gamma)
-
-def plot_normal_variogram(ax, df, title, max_lag, n_lags):
-    h, g = compute_variogram(df, max_lag, n_lags)
-    ax.plot(h, g, "o-", color="red")
-    ax.set_xlabel("Lag Distance (m)")
-    ax.set_ylabel("Semivariance γ(h)")
-    ax.set_title(f"{title} - Normal Variogram", fontweight="bold")
-    ax.grid(True, alpha=0.3)
-
-def plot_long_short_variogram(ax, df, title, max_lag, n_lags):
-    h0, g0 = compute_variogram(df, max_lag, n_lags, direction=0)
-    h90, g90 = compute_variogram(df, max_lag, n_lags, direction=90)
-    ax.plot(h0, g0, "o-", label="0° (Long)", color="blue")
-    ax.plot(h90, g90, "s-", label="90° (Short)", color="green")
-    ax.legend()
-    ax.set_xlabel("Lag Distance (m)")
-    ax.set_ylabel("Semivariance γ(h)")
-    ax.set_title(f"{title} - Directional Variogram", fontweight="bold")
-    ax.grid(True, alpha=0.3)
-
-# ---------- VARIOGRAM HEATMAP ----------
-def plot_variogram_heatmap(ax, df, title, max_lag, n_lags):
-    coords = df[["x", "y"]].values
-    z = df["z"].values
-    h = squareform(pdist(coords))
-    dz = np.abs(np.subtract.outer(z, z))
-    lag_edges = np.linspace(0, max_lag, n_lags + 1)
-    gamma = np.full((n_lags, n_lags), np.nan)
-    for i in range(n_lags):
-        for j in range(n_lags):
-            mask = (h >= lag_edges[i]) & (h < lag_edges[i+1]) & \
-                   (h >= lag_edges[j]) & (h < lag_edges[j+1])
-            if mask.sum() > 0:
-                gamma[i, j] = 0.5 * (dz[mask] ** 2).mean()
-    im = ax.imshow(gamma, extent=(0, max_lag, 0, max_lag), origin="lower",
-                   cmap="viridis", aspect="auto")
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label("Semivariance γ(h)")
-    ax.set_xlabel("Lag distance (m) – X")
-    ax.set_ylabel("Lag distance (m) – Y")
-    ax.set_title(f"{title} - Variogram Heatmap", fontweight="bold")
 
 # ---------- OVERLAY ----------
 def plot_overlay(ax, struct_df, thick_df):
@@ -293,7 +223,7 @@ for fname in all_contours.keys():
         ylabel = st.text_input("Y Label", value="Y (m)", key=f"yl_{fname}")
         unit = st.text_input("Unit", value="", key=f"u_{fname}")
 
-        # Structure / Thickness
+        # Contour maps
         if map_type in ["Structure Map", "Thickness Map"]:
             z_vals = [c["z"] for c in all_contours[fname]]
             zmin, zmax = min(z_vals), max(z_vals)
@@ -306,17 +236,10 @@ for fname in all_contours.keys():
         # Property Heatmap
         if map_type == "Property Heatmap":
             distribution = st.selectbox("Distribution", DISTRIBUTIONS, key=f"dist_{fname}")
-            vario_range = st.selectbox("Variogram Range", VARIOGRAM_RANGES, key=f"vr_{fname}")
+            vario_type = st.selectbox("Variogram Type", VARIOGRAM_TYPES, key=f"vr_{fname}")
             cmap = st.selectbox("Colormap", ["YlOrRd", "plasma", "viridis"], key=f"cm_{fname}")
         else:
-            distribution = vario_range = None
-
-        # Variogram
-        if "Variogram" in map_type:
-            max_lag = st.slider("Max Lag (m)", 100, 10000, 3000, step=100, key=f"lag_{fname}")
-            n_lags = st.slider("Lags", 10, 50, 20, key=f"nlags_{fname}")
-        else:
-            max_lag, n_lags = 3000, 20
+            distribution = vario_type = None
 
         # Histogram
         if map_type == "Histogram":
@@ -333,9 +256,7 @@ for fname in all_contours.keys():
             "levels": levels,
             "cmap": cmap,
             "distribution": distribution,
-            "vario_range": vario_range,
-            "max_lag": max_lag,
-            "n_lags": n_lags,
+            "vario_type": vario_type,
             "bins": bins,
         }
 
@@ -351,23 +272,14 @@ if plot_mode == "Single File":
     fig, ax = plt.subplots(figsize=(11, 9), dpi=160)
 
     mt = cfg["map_type"]
-    if mt == "Structure Map":
-        plot_structure_or_thickness(ax, df, cfg["title"], cfg["xlabel"], cfg["ylabel"],
-                                    cfg["unit"], cfg["levels"], cfg["cmap"])
-    elif mt == "Thickness Map":
-        plot_structure_or_thickness(ax, df, cfg["title"], cfg["xlabel"], cfg["ylabel"],
-                                    cfg["unit"], cfg["levels"], cfg["cmap"])
+    if mt in ["Structure Map", "Thickness Map"]:
+        plot_contour_map(ax, df, cfg["title"], cfg["xlabel"], cfg["ylabel"],
+                         cfg["unit"], cfg["levels"], cfg["cmap"])
     elif mt == "Property Heatmap":
         plot_property_heatmap(ax, df, cfg["title"], cfg["xlabel"], cfg["ylabel"],
-                              cfg["unit"], cfg["cmap"], cfg["distribution"], cfg["vario_range"])
+                              cfg["unit"], cfg["cmap"], cfg["distribution"], cfg["vario_type"])
     elif mt == "Histogram":
         plot_histogram(ax, df, cfg["title"], cfg["unit"], cfg["bins"])
-    elif mt == "Normal Variogram":
-        plot_normal_variogram(ax, df, cfg["title"], cfg["max_lag"], cfg["n_lags"])
-    elif mt == "Long/Short Directional Variogram":
-        plot_long_short_variogram(ax, df, cfg["title"], cfg["max_lag"], cfg["n_lags"])
-    elif mt == "Variogram Heatmap":
-        plot_variogram_heatmap(ax, df, cfg["title"], cfg["max_lag"], cfg["n_lags"])
     elif mt == "Overlay: Structure + Thickness":
         s_file = next((f for f in all_contours if "struct" in f.lower()), None)
         t_file = next((f for f in all_contours if "thick" in f.lower()), None)
@@ -378,13 +290,14 @@ if plot_mode == "Single File":
     plt.tight_layout()
     st.pyplot(fig)
 
-    # Export
+    # Export PNG
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
     buf.seek(0)
     st.download_button("Download PNG", buf, f"{cfg['title']}.png", "image/png")
 
-    if st.checkbox("Export Grid CSV"):
+    # Export Grid CSV
+    if st.checkbox("Export Interpolated Grid (CSV)"):
         xi = np.linspace(df["x"].min(), df["x"].max(), 500)
         yi = np.linspace(df["y"].min(), df["y"].max(), 500)
         Xi, Yi = np.meshgrid(xi, yi)
@@ -402,23 +315,14 @@ else:  # Batch
             fig, ax = plt.subplots(figsize=(11, 9), dpi=160)
             mt = cfg["map_type"]
 
-            if mt == "Structure Map":
-                plot_structure_or_thickness(ax, df, cfg["title"], cfg["xlabel"], cfg["ylabel"],
-                                            cfg["unit"], cfg["levels"], cfg["cmap"])
-            elif mt == "Thickness Map":
-                plot_structure_or_thickness(ax, df, cfg["title"], cfg["xlabel"], cfg["ylabel"],
-                                            cfg["unit"], cfg["levels"], cfg["cmap"])
+            if mt in ["Structure Map", "Thickness Map"]:
+                plot_contour_map(ax, df, cfg["title"], cfg["xlabel"], cfg["ylabel"],
+                                 cfg["unit"], cfg["levels"], cfg["cmap"])
             elif mt == "Property Heatmap":
                 plot_property_heatmap(ax, df, cfg["title"], cfg["xlabel"], cfg["ylabel"],
-                                      cfg["unit"], cfg["cmap"], cfg["distribution"], cfg["vario_range"])
+                                      cfg["unit"], cfg["cmap"], cfg["distribution"], cfg["vario_type"])
             elif mt == "Histogram":
                 plot_histogram(ax, df, cfg["title"], cfg["unit"], cfg["bins"])
-            elif mt == "Normal Variogram":
-                plot_normal_variogram(ax, df, cfg["title"], cfg["max_lag"], cfg["n_lags"])
-            elif mt == "Long/Short Directional Variogram":
-                plot_long_short_variogram(ax, df, cfg["title"], cfg["max_lag"], cfg["n_lags"])
-            elif mt == "Variogram Heatmap":
-                plot_variogram_heatmap(ax, df, cfg["title"], cfg["max_lag"], cfg["n_lags"])
             plt.tight_layout()
             figs.append((cfg["title"], fig))
 
