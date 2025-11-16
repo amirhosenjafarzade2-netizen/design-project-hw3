@@ -272,7 +272,6 @@ else:  # Heatmap
         st.subheader("Data source")
         use_real = st.checkbox("Use real contour points (recommended)", value=True)
 
-        # ---- ALWAYS show distribution & variogram ----
         st.subheader("Statistical Model")
         dist = st.selectbox(
             "Distribution",
@@ -285,7 +284,6 @@ else:  # Heatmap
             key="vario"
         )
 
-        # ---- Grid & colormap ----
         st.subheader("Grid")
         res = st.slider("Resolution (cells)", 50, 500, 200, 25, key="res")
         cmap = st.selectbox(
@@ -294,7 +292,6 @@ else:  # Heatmap
             key="cmap"
         )
 
-        # ---- Real-data specific options ----
         if use_real:
             interp_method = st.selectbox(
                 "Fallback Interpolation (griddata)",
@@ -307,9 +304,9 @@ else:  # Heatmap
                 value=False
             )
         else:
-            use_statistical = True   # forced when simulating
+            use_statistical = True
 
-    # ---------- 1. Gather points from BNA files ----------
+    # ---------- 1. Gather points ----------
     raw_points, raw_values = [], []
     for f in uploaded_files:
         for val, pts in parse_bna(f):
@@ -323,13 +320,11 @@ else:  # Heatmap
     points = np.array(raw_points)
     values = np.array(raw_values)
 
-    # ---------- 2. Grid extent ----------
+    # ---------- 2. Grid extent – **EXACTLY** data limits ----------
     min_x, max_x = points[:, 0].min(), points[:, 0].max()
     min_y, max_y = points[:, 1].min(), points[:, 1].max()
-    margin = 0.05 * max(max_x - min_x, max_y - min_y)
-    min_x, max_x = min_x - margin, max_x + margin
-    min_y, max_y = min_y - margin, max_y + margin
 
+    # No margin → tight bounds
     grid_x, grid_y = np.mgrid[min_x:max_x:res*1j, min_y:max_y:res*1j]
     grid_shape = grid_x.shape
     grid_pts = np.column_stack((grid_x.ravel(), grid_y.ravel()))
@@ -340,13 +335,10 @@ else:  # Heatmap
 
     # ---------- 4. Interpolation / Simulation ----------
     if use_real and not use_statistical:
-        # ---- Classic griddata (fast, exact) ----
         grid_z = griddata(points, values, (grid_x, grid_y), method=interp_method)
-        grid_z = np.nan_to_num(grid_z, nan=np.nanmean(grid_z))
+        grid_z = np_to_num(grid_z, nan=np.nanmean(grid_z))
         title_suffix = " (real – griddata)"
-
     else:
-        # ---- Statistical smoothing (real or simulated) ----
         if use_real:
             seed_pts, seed_val = points, values
             sim_mode = "real-smoothed"
@@ -356,7 +348,6 @@ else:  # Heatmap
             seed_pts, seed_val = points[idx], values[idx]
             sim_mode = "simulated"
 
-        # ---- Values (real or generated) ----
         if not use_real:
             if dist == "Normal":
                 sim_vals = np.random.normal(
@@ -374,9 +365,8 @@ else:  # Heatmap
                     seed_val.min(), seed_val.max(), size=len(seed_val)
                 )
         else:
-            sim_vals = seed_val   # keep real values
+            sim_vals = seed_val
 
-        # ---- Exponential covariance weighting ----
         dists = np.sqrt(((seed_pts[None, :, :] - grid_pts[:, None, :]) ** 2).sum(-1))
         weights = np.exp(-dists / corr_len)
         weights /= weights.sum(axis=1, keepdims=True) + 1e-12
@@ -387,12 +377,12 @@ else:  # Heatmap
             f" ({'real-smoothed' if use_real else 'simulated'} – {dist}/{vario})"
         )
 
-    # ---------- 5. Plot ----------
+    # ---------- 5. Plot – extent matches grid exactly ----------
     vmin, vmax = np.nanmin(grid_z), np.nanmax(grid_z)
     fig, ax = plt.subplots(figsize=(12, 10), dpi=150)
     im = ax.imshow(
         grid_z,
-        extent=[min_x, max_x, min_y, max_y],
+        extent=[min_x, max_x, min_y, max_y],   # <-- tight bounds
         origin="lower",
         cmap=cmap,
         vmin=vmin,
