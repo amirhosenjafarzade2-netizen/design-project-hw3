@@ -272,31 +272,50 @@ else:  # Heatmap
         st.subheader("Data source")
         use_real = st.checkbox("Use real contour points (recommended)", value=True)
 
-        if not use_real:
-            st.subheader("Distribution")
-            dist = st.selectbox("Type", ["Normal", "Lognormal", "Uniform"], key="dist")
-            st.subheader("Variogram")
-            vario = st.selectbox("Behavior", ["Smooth", "Short", "Long"], key="vario")
+        # ---- ALWAYS show distribution & variogram ----
+        st.subheader("Statistical Model")
+        dist = st.selectbox(
+            "Distribution",
+            ["Normal", "Lognormal", "Uniform"],
+            key="dist"
+        )
+        vario = st.selectbox(
+            "Variogram Behavior",
+            ["Smooth", "Short", "Long"],
+            key="vario"
+        )
 
+        # ---- Grid & colormap ----
         st.subheader("Grid")
         res = st.slider("Resolution (cells)", 50, 500, 200, 25, key="res")
-        cmap = st.selectbox("Colormap",
-                            ["viridis", "plasma", "inferno", "hot", "jet", "turbo"],
-                            key="cmap")
-        interp_method = st.selectbox("Interpolation (real data)",
-                                    ["linear", "cubic", "nearest"],
-                                    index=0, key="interp")
+        cmap = st.selectbox(
+            "Colormap",
+            ["viridis", "plasma", "inferno", "hot", "jet", "turbo"],
+            key="cmap"
+        )
+
+        # ---- Real-data specific options ----
+        if use_real:
+            interp_method = st.selectbox(
+                "Fallback Interpolation (griddata)",
+                ["linear", "cubic", "nearest"],
+                index=0,
+                key="interp"
+            )
+            use_statistical = st.checkbox(
+                "Use statistical smoothing (instead of griddata)",
+                value=False
+            )
+        else:
+            use_statistical = True   # forced when simulating
 
     # ---------- 1. Gather points from BNA files ----------
-    raw_points = []
-    raw_values = []
+    raw_points, raw_values = [], []
     for f in uploaded_files:
-        contours = parse_bna(f)
-        for val, pts in contours:
+        for val, pts in parse_bna(f):
             for x, y in pts:
                 raw_points.append([x, y])
                 raw_values.append(val)
-
     if not raw_points:
         st.error("No contour points found in the uploaded BNA files.")
         st.stop()
@@ -307,68 +326,82 @@ else:  # Heatmap
     # ---------- 2. Grid extent ----------
     min_x, max_x = points[:, 0].min(), points[:, 0].max()
     min_y, max_y = points[:, 1].min(), points[:, 1].max()
-    margin = 0.05 * max(max_x - min_x, max_y - min_y)   # 5% padding
+    margin = 0.05 * max(max_x - min_x, max_y - min_y)
     min_x, max_x = min_x - margin, max_x + margin
     min_y, max_y = min_y - margin, max_y + margin
 
     grid_x, grid_y = np.mgrid[min_x:max_x:res*1j, min_y:max_y:res*1j]
     grid_shape = grid_x.shape
+    grid_pts = np.column_stack((grid_x.ravel(), grid_y.ravel()))
 
-    # ---------- 3. Interpolate / Simulate ----------
-    if use_real:
-        # ---- Direct interpolation (griddata) ----
-        grid_z = griddata(points, values, (grid_x, grid_y),
-                          method=interp_method)
+    # ---------- 3. Correlation length ----------
+    domain = max(max_x - min_x, max_y - min_y)
+    corr_len = {"Smooth": 0.30, "Short": 0.08, "Long": 0.60}[vario] * domain
+
+    # ---------- 4. Interpolation / Simulation ----------
+    if use_real and not use_statistical:
+        # ---- Classic griddata (fast, exact) ----
+        grid_z = griddata(points, values, (grid_x, grid_y), method=interp_method)
         grid_z = np.nan_to_num(grid_z, nan=np.nanmean(grid_z))
-        title_suffix = " (real contours)"
+        title_suffix = " (real – griddata)"
+
     else:
-        # ---- Simulate a field that honours the variogram ----
-        n_seeds = min(200, len(points))
-        idx = np.random.choice(len(points), n_seeds, replace=False)
-        seed_pts = points[idx]
-        seed_val = values[idx]
+        # ---- Statistical smoothing (real or simulated) ----
+        if use_real:
+            seed_pts, seed_val = points, values
+            sim_mode = "real-smoothed"
+        else:
+            n_seeds = min(200, len(points))
+            idx = np.random.choice(len(points), n_seeds, replace=False)
+            seed_pts, seed_val = points[idx], values[idx]
+            sim_mode = "simulated"
 
-        # variogram length
-        corr_len = {"Smooth": 0.30, "Short": 0.08, "Long": 0.60}[vario]
-        corr_len = corr_len * max(max_x - min_x, max_y - min_y)
+        # ---- Values (real or generated) ----
+        if not use_real:
+            if dist == "Normal":
+                sim_vals = np.random.normal(
+                    loc=seed_val.mean(),
+                    scale=seed_val.std() or 1.0,
+                    size=len(seed_val)
+                )
+            elif dist == "Lognormal":
+                pos = seed_val[seed_val > 0]
+                pos = pos if len(pos) else np.array([1.0])
+                mu, s = np.log(pos).mean(), np.log(pos).std()
+                sim_vals = np.exp(np.random.normal(mu, s, size=len(seed_val)))
+            else:  # Uniform
+                sim_vals = np.random.uniform(
+                    seed_val.min(), seed_val.max(), size=len(seed_val)
+                )
+        else:
+            sim_vals = seed_val   # keep real values
 
-        # generate values
-        if dist == "Normal":
-            sim_vals = np.random.normal(loc=seed_val.mean(),
-                                        scale=seed_val.std() or 1.0,
-                                        size=n_seeds)
-        elif dist == "Lognormal":
-            positive = seed_val[seed_val > 0]
-            if len(positive) == 0:
-                positive = np.array([1.0])
-            s = np.log(positive).std()
-            mu = np.log(positive).mean()
-            sim_vals = np.exp(np.random.normal(mu, s, n_seeds))
-        else:  # Uniform
-            sim_vals = np.random.uniform(seed_val.min(), seed_val.max(), n_seeds)
-
-        # exponential weighting (IDW-like)
-        grid_pts = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+        # ---- Exponential covariance weighting ----
         dists = np.sqrt(((seed_pts[None, :, :] - grid_pts[:, None, :]) ** 2).sum(-1))
         weights = np.exp(-dists / corr_len)
         weights /= weights.sum(axis=1, keepdims=True) + 1e-12
         grid_z = (weights * sim_vals[None, :]).sum(axis=1)
         grid_z = grid_z.reshape(grid_shape)
-        title_suffix = f" (simulated – {dist} / {vario})"
 
-    # ---------- 4. Plot ----------
+        title_suffix = (
+            f" ({'real-smoothed' if use_real else 'simulated'} – {dist}/{vario})"
+        )
+
+    # ---------- 5. Plot ----------
     vmin, vmax = np.nanmin(grid_z), np.nanmax(grid_z)
-
     fig, ax = plt.subplots(figsize=(12, 10), dpi=150)
-    im = ax.imshow(grid_z,
-                   extent=[min_x, max_x, min_y, max_y],
-                   origin='lower',
-                   cmap=cmap,
-                   vmin=vmin, vmax=vmax)
+    im = ax.imshow(
+        grid_z,
+        extent=[min_x, max_x, min_y, max_y],
+        origin="lower",
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+    )
     ax.set_title(chart_title + title_suffix)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
-    ax.set_aspect('equal')  # Fixed: was broken before
+    ax.set_aspect("equal")
     cbar = plt.colorbar(im, ax=ax, shrink=0.8)
     cbar.set_label("Value")
     plt.tight_layout()
