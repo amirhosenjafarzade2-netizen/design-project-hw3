@@ -320,11 +320,10 @@ else:  # Heatmap
     points = np.array(raw_points)
     values = np.array(raw_values)
 
-    # ---------- 2. Grid extent – **EXACTLY** data limits ----------
+    # ---------- 2. Grid extent – EXACT data limits ----------
     min_x, max_x = points[:, 0].min(), points[:, 0].max()
     min_y, max_y = points[:, 1].min(), points[:, 1].max()
 
-    # No margin → tight bounds
     grid_x, grid_y = np.mgrid[min_x:max_x:res*1j, min_y:max_y:res*1j]
     grid_shape = grid_x.shape
     grid_pts = np.column_stack((grid_x.ravel(), grid_y.ravel()))
@@ -335,8 +334,9 @@ else:  # Heatmap
 
     # ---------- 4. Interpolation / Simulation ----------
     if use_real and not use_statistical:
+        # FIXED: np.nan_to_num
         grid_z = griddata(points, values, (grid_x, grid_y), method=interp_method)
-        grid_z = np_to_num(grid_z, nan=np.nanmean(grid_z))
+        grid_z = np.nan_to_num(grid_z, nan=np.nanmean(grid_z))
         title_suffix = " (real – griddata)"
     else:
         if use_real:
@@ -377,12 +377,12 @@ else:  # Heatmap
             f" ({'real-smoothed' if use_real else 'simulated'} – {dist}/{vario})"
         )
 
-    # ---------- 5. Plot – extent matches grid exactly ----------
+    # ---------- 5. Plot ----------
     vmin, vmax = np.nanmin(grid_z), np.nanmax(grid_z)
     fig, ax = plt.subplots(figsize=(12, 10), dpi=150)
     im = ax.imshow(
         grid_z,
-        extent=[min_x, max_x, min_y, max_y],   # <-- tight bounds
+        extent=[min_x, max_x, min_y, max_y],
         origin="lower",
         cmap=cmap,
         vmin=vmin,
