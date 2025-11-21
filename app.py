@@ -266,107 +266,111 @@ elif mode == "Overlay Contours":
 # ==================================================================
 # ==================================================================
 # ==================================================================
-# 4. HEATMAP – FAST & ACCURATE CONTOUR-AWARE (2025 version)
 # ==================================================================
-else:  # Heatmap (fast contour-aware)
+# 4. HEATMAP – FAST & BEAUTIFUL CONTOUR-AWARE (works 2025)
+# ==================================================================
+else:  # Heatmap (fast contour-aware – no deprecated matplotlib calls)
     with st.sidebar:
         st.subheader("Heatmap Settings")
-        res = st.slider("Grid resolution", 200, 1200, 600, step=50)
+        res = st.slider("Grid resolution", 200, 1200, 700, 50)
         cmap = st.selectbox("Colormap", ["viridis", "plasma", "inferno", "turbo", "hot", "jet", "RdBu_r", "cividis"], index=1)
-        smoothness = st.slider("Smoothness (higher = softer)", 1.0, 8.0, 3.0, 0.5)
+        smoothness = st.slider("Smoothness", 0.5, 6.0, 2.5, 0.5)
         show_contours = st.checkbox("Overlay original contours", True)
-        contour_lw = st.slider("Contour line width", 0.3, 2.0, 0.8, 0.1) if show_contours else 0
+        contour_lw = st.slider("Contour linewidth", 0.4, 2.0, 0.9, 0.1) if show_contours else 0
 
-    import scipy.ndimage as ndimage
+    from scipy.ndimage import gaussian_filter, distance_transform_edt
+    from skimage.draw import polygon
 
-    # 1. Collect all contours
-    contours_by_value = {}
-    all_pts = []
+    # 1. Collect all contours grouped by value
+    contours_by_val = {}
+    all_points = []
     for f in uploaded_files:
-        for val, pts_list in parse_bna(f):
-            if len(pts_list) < 3:
+        for val, pts in parse_bna(f):
+            if len(pts) < 3: 
                 continue
-            poly = np.array(pts_list)
-            all_pts.append(poly)
-            contours_by_value.setdefault(val, []).append(poly)
+            poly = np.array(pts)
+            all_points.append(poly)
+            contours_by_val.setdefault(val, []).append(poly)
 
-    if not all_pts:
+    if not all_points:
         st.error("No valid contours found.")
         st.stop()
 
-    all_pts = np.vstack(all_pts)
-    min_x, max_x = all_pts[:,0].min(), all_pts[:,0].max()
-    min_y, max_y = all_pts[:,1].min(), all_pts[:,1].max()
-    margin = 0.05 * max(max_x-min_x, max_y-min_y)
+    all_points = np.vstack(all_points)
+    min_x, max_x = all_points[:,0].min(), all_points[:,0].max()
+    min_y, max_y = all_points[:,1].min(), all_points[:,1].max()
+    margin = 0.06 * max(max_x-min_x, max_y-min_y)
     min_x -= margin; max_x += margin; min_y -= margin; max_y += margin
 
-    # Create high-res grid
-    grid_x, grid_y = np.mgrid[min_x:max_x:res*1j, min_y:max_y:res*1j]
-    width, height = grid_x.shape[1], grid_x.shape[0]
+    # Create grid
+    xi, yi = np.linspace(min_x, max_x, res), np.linspace(min_y, max_y, res)
+    grid_x, grid_y = np.meshgrid(xi, yi)
+    height, width = res, res
 
-    # 2. Create a blank canvas and draw all contours as thin filled lines
-    mask = np.zeros((height, width), dtype=bool)
-    for val, polys in contours_by_value.items():
-        fig_temp, ax_temp = plt.subplots()
-        ax_temp.set_xlim(min_x, max_x)
-        ax_temp.set_ylim(min_y, max_y)
+    # 2. Create a binary mask where contours are drawn (thick lines)
+    contour_mask = np.zeros((height, width), dtype=bool)
+
+    for val, polys in contours_by_val.items():
         for poly in polys:
-            patch = plt.Polygon(poly, closed=True, fill=True, edgecolor='white', facecolor='white', linewidth=3)
-            ax_temp.add_patch(patch)
-        fig_temp.canvas.draw()
-        data = np.frombuffer(fig_temp.canvas.tostring_rgb(), dtype=np.uint8)
-        data = data.reshape(fig_temp.canvas.get_width_height()[::-1] + (3,))
-        gray = data[:,:,0] > 128  # white areas
-        mask |= gray
-        plt.close(fig_temp)
+            # Convert polygon coordinates to image indices
+            poly_x = np.interp(poly[:,0], [min_x, max_x], [0, width-1]).astype(int)
+            poly_y = np.interp(poly[:,1], [min_y, max_y], [height-1, 0]).astype(int)  # y flipped
+            rr, cc = polygon(poly_y, poly_x, (height, width))
+            # Thicken the line
+            for dr in range(-6, 7):
+                for dc in range(-6, 7):
+                    if dr*dr + dc*dc <= 36:  # circle radius ~6 pixels
+                        r = np.clip(rr + dr, 0, height-1)
+                        c = np.clip(cc + dc, 0, width-1)
+                        contour_mask[r, c] = True
 
-    # 3. Distance transform (distance to nearest contour line)
-    distance = ndimage.distance_transform_edt(~mask)  # distance from non-contour pixels
+    # 3. Distance transform → how far each pixel is from nearest contour
+    dist = distance_transform_edt(~contour_mask)
 
-    # 4. Value interpolation using weighted average of nearest contours
-    values_grid = np.zeros((height, width))
-    weights_grid = np.zeros((height, width))
+    # 4. Weighted sum of all contour values (inverse distance squared)
+    value_map = np.zeros((height, width))
+    weight_map = np.zeros((height, width))
 
-    for val, polys in contours_by_value.items():
+    for val, polys in contours_by_val.items():
         val_mask = np.zeros((height, width), dtype=bool)
-        fig_temp, ax_temp = plt.subplots()
-        ax_temp.set_xlim(min_x, max_x); ax_temp.set_ylim(min_y, max_y)
         for poly in polys:
-            patch = plt.Polygon(poly, closed=True, fill=True, edgecolor='white', facecolor='white', linewidth=4)
-            ax_temp.add_patch(patch)
-        fig_temp.canvas.draw()
-        data = np.frombuffer(fig_temp.canvas.tostring_rgb(), dtype=np.uint8).reshape(fig_temp.canvas.get_width_height()[::-1] + (3,))
-        val_mask |= (data[:,:,0] > 128)
-        plt.close(fig_temp)
+            poly_x = np.interp(poly[:,0], [min_x, max_x], [0, width-1]).astype(int)
+            poly_y = np.interp(poly[:,1], [min_y, max_y], [height-1, 0]).astype(int)
+            rr, cc = polygon(poly_y, poly_x, (height, width))
+            for dr in range(-8, 9):
+                for dc in range(-8, 9):
+                    if dr*dr + dc*dc <= 64:
+                        r = np.clip(rr + dr, 0, height-1)
+                        c = np.clip(cc + dc, 0, width-1)
+                        val_mask[r, c] = True
 
-        # Add this contour's value weighted by inverse distance
-        weight = val_mask.astype(float) / (distance + 1e-8)**2
-        values_grid += val * weight
-        weights_grid += weight
+        w = val_mask.astype(float) / (dist**2 + 1e-8)
+        value_map += val * w
+        weight_map += w
 
-    grid_z = values_grid / (weights_grid + 1e-12)
+    grid_z = value_map / (weight_map + 1e-12)
 
-    # 5. Optional final smoothing
-    if smoothness > 0:
-        grid_z = ndimage.gaussian_filter(grid_z, sigma=smoothness)
+    # 5. Final smoothing
+    grid_z = gaussian_filter(grid_z, sigma=smoothness)
 
     # 6. Plot
-    fig, ax = plt.subplots(figsize=(14, 11), dpi=150)
+    fig, ax = plt.subplots(figsize=(14, 11), dpi=160)
     im = ax.imshow(grid_z, extent=[min_x, max_x, min_y, max_y], origin='lower',
                    cmap=cmap, interpolation='bilinear')
 
     if show_contours:
-        for val, polys in contours_by_value.items():
+        for val, polys in contours_by_val.items():
             for poly in polys:
-                ax.plot(poly[:,0], poly[:,1], color='white', lw=contour_lw, alpha=0.7)
+                ax.plot(poly[:,0], poly[:,1], color='white', linewidth=contour_lw, alpha=0.75)
 
-    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
     cbar.set_label("Value", rotation=270, labelpad=20)
 
-    ax.set_title(chart_title + " – Fast Contour-Aware Heatmap", fontsize=16, pad=20)
+    ax.set_title(chart_title + " – Fast & Accurate Contour Heatmap", fontsize=16, pad=20)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_aspect('equal')
+    ax.grid(False)
     plt.tight_layout()
     st.pyplot(fig)
 # ==================================================================
