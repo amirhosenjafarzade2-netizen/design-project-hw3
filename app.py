@@ -264,136 +264,139 @@ elif mode == "Overlay Contours":
     st.pyplot(fig)
 
 # ==================================================================
-# 4. HEATMAP – AUTO color scale from data min/max
 # ==================================================================
-else:  # Heatmap
-    # ---------- Sidebar controls ----------
+# 4. HEATMAP – CONTOUR-AWARE (NEW & MUCH BETTER)
+# ==================================================================
+else:  # Heatmap (contour-aware)
     with st.sidebar:
-        st.subheader("Data source")
-        use_real = st.checkbox("Use real contour points (recommended)", value=True)
+        st.subheader("Heatmap Settings")
+        res = st.slider("Grid resolution", 100, 800, 400, 50)
+        cmap = st.selectbox("Colormap", ["viridis", "plasma", "inferno", "turbo", "hot", "jet", "RdBu_r"], index=1)
+        blur_contours = st.checkbox("Soft contour boundaries (Gaussian blur)", True)
+        blur_sigma = st.slider("Blur sigma (softness)", 0.5, 10.0, 2.0, 0.5) if blur_contours else 0
+        show_contours = st.checkbox("Overlay original contours", True)
 
-        st.subheader("Statistical Model")
-        dist = st.selectbox(
-            "Distribution",
-            ["Normal", "Lognormal", "Uniform"],
-            key="dist"
-        )
-        vario = st.selectbox(
-            "Variogram Behavior",
-            ["Smooth", "Short", "Long"],
-            key="vario"
-        )
-
-        st.subheader("Grid")
-        res = st.slider("Resolution (cells)", 50, 500, 200, 25, key="res")
-        cmap = st.selectbox(
-            "Colormap",
-            ["viridis", "plasma", "inferno", "hot", "jet", "turbo"],
-            key="cmap"
-        )
-
-        if use_real:
-            interp_method = st.selectbox(
-                "Fallback Interpolation (griddata)",
-                ["linear", "cubic", "nearest"],
-                index=0,
-                key="interp"
-            )
-            use_statistical = st.checkbox(
-                "Use statistical smoothing (instead of griddata)",
-                value=False
-            )
-        else:
-            use_statistical = True
-
-    # ---------- 1. Gather points ----------
-    raw_points, raw_values = [], []
+    # --------------------- 1. Collect all contour polylines ---------------------
+    all_contours = []  # list of (value, np.array Nx2)
     for f in uploaded_files:
         for val, pts in parse_bna(f):
-            for x, y in pts:
-                raw_points.append([x, y])
-                raw_values.append(val)
-    if not raw_points:
-        st.error("No contour points found in the uploaded BNA files.")
+            if len(pts) >= 3:
+                poly = np.array(pts)
+                all_contours.append((val, poly))
+
+    if not all_contours:
+        st.error("No valid contours found.")
         st.stop()
 
-    points = np.array(raw_points)
-    values = np.array(raw_values)
-
-    # ---------- 2. Grid extent – EXACT data limits ----------
-    min_x, max_x = points[:, 0].min(), points[:, 0].max()
-    min_y, max_y = points[:, 1].min(), points[:, 1].max()
+    # --------------------- 2. Determine global bounds ---------------------
+    all_pts = np.vstack([poly for _, poly in all_contours])
+    min_x, max_x = all_pts[:,0].min(), all_pts[:,0].max()
+    min_y, max_y = all_pts[:,1].min(), all_pts[:,1].max()
+    margin = 0.05 * max(max_x-min_x, max_y-min_y)
+    min_x, max_x = min_x - margin, max_x + margin
+    min_y, max_y = min_y - margin, max_y + margin
 
     grid_x, grid_y = np.mgrid[min_x:max_x:res*1j, min_y:max_y:res*1j]
-    grid_shape = grid_x.shape
-    grid_pts = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+    xi = np.column_stack((grid_x.ravel(), grid_y.ravel()))
 
-    # ---------- 3. Correlation length ----------
-    domain = max(max_x - min_x, max_y - min_y)
-    corr_len = {"Smooth": 0.30, "Short": 0.08, "Long": 0.60}[vario] * domain
+    # --------------------- 3. Contour-aware interpolation ---------------------
+    # For every grid cell, find distance & value of nearest contour segment
+    from scipy.spatial import cKDTree
 
-    # ---------- 4. Interpolation / Simulation ----------
-    if use_real and not use_statistical:
-        # FIXED: np.nan_to_num
-        grid_z = griddata(points, values, (grid_x, grid_y), method=interp_method)
-        grid_z = np.nan_to_num(grid_z, nan=np.nanmean(grid_z))
-        title_suffix = " (real – griddata)"
-    else:
-        if use_real:
-            seed_pts, seed_val = points, values
-            sim_mode = "real-smoothed"
+    grid_z = np.full(xi.shape[0], np.nan)
+
+    # Build a list of all line segments
+    segments = []
+    seg_values = []
+    for val, poly in all_contours:
+        for i in range(len(poly)):
+            p1 = poly[i]
+            p2 = poly[(i+1) % len(poly)]  # closed loop
+            segments.append((p1, p2))
+            seg_values.append(val)
+
+    # Query nearest segment for every grid point
+    def nearest_segment_distance_value(points):
+        min_dist = np.full(len(points), np.inf)
+        min_val = np.full(len(points), np.nan)
+        for (p1, p2), val in zip(segments, seg_values):
+            v1 = points - p1
+            v2 = p2 - p1
+            len2 = (v2**2).sum()
+            if len2 == 0:
+                dist = np.linalg.norm(v1, axis=1)
+            else:
+                t = np.clip(np.dot(v1, v2) / len2, 0, 1)
+                proj = p1 + t[:,None] * v2
+                dist = np.linalg.norm(points - proj, axis=1)
+            closer = dist < min_dist
+            min_dist[closer] = dist[closer]
+            min_val[closer] = val
+        return min_dist, min_val
+
+    distances, nearest_vals = nearest_segment_distance_value(xi)
+
+    # Now interpolate between nearest higher and lower contours
+    final_z = np.zeros_like(distances)
+    for i in range(len(xi)):
+        x, y = xi[i]
+        # Find all contours that this point is "between"
+        candidates = []
+        for val, poly in all_contours:
+            # Signed distance approximation via winding or ray-cast would be ideal,
+            # but for speed we use distance to polygon edge + value comparison
+            d = np.min(np.linalg.norm(poly - [x,y], axis=1))
+            candidates.append((val, d))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda cv: cv[0])  # sort by contour value
+
+        # Find lower and upper bounding contours
+        lower_val = lower_dist = None
+        upper_val = upper_dist = None
+        for val, dist in candidates:
+            if val <= nearest_vals[i] and (lower_val is None or val > lower_val):
+                lower_val, lower_dist = val, dist
+            if val >= nearest_vals[i] and (upper_val is None or val < upper_val):
+                upper_val, upper_dist = val, dist
+
+        if lower_val is None or upper_val is None or lower_val == upper_val:
+            final_z[i] = nearest_vals[i]
         else:
-            n_seeds = min(200, len(points))
-            idx = np.random.choice(len(points), n_seeds, replace=False)
-            seed_pts, seed_val = points[idx], values[idx]
-            sim_mode = "simulated"
+            total_d = lower_dist + upper_dist + 1e-12
+            final_z[i] = (upper_dist * lower_val + lower_dist * upper_val) / total_d
 
-        if not use_real:
-            if dist == "Normal":
-                sim_vals = np.random.normal(
-                    loc=seed_val.mean(),
-                    scale=seed_val.std() or 1.0,
-                    size=len(seed_val)
-                )
-            elif dist == "Lognormal":
-                pos = seed_val[seed_val > 0]
-                pos = pos if len(pos) else np.array([1.0])
-                mu, s = np.log(pos).mean(), np.log(pos).std()
-                sim_vals = np.exp(np.random.normal(mu, s, size=len(seed_val)))
-            else:  # Uniform
-                sim_vals = np.random.uniform(
-                    seed_val.min(), seed_val.max(), size=len(seed_val)
-                )
-        else:
-            sim_vals = seed_val
+    grid_z = final_z.reshape(grid_x.shape)
 
-        dists = np.sqrt(((seed_pts[None, :, :] - grid_pts[:, None, :]) ** 2).sum(-1))
-        weights = np.exp(-dists / corr_len)
-        weights /= weights.sum(axis=1, keepdims=True) + 1e-12
-        grid_z = (weights * sim_vals[None, :]).sum(axis=1)
-        grid_z = grid_z.reshape(grid_shape)
+    # Optional Gaussian blur for softer look
+    if blur_contours and blur_sigma > 0:
+        from scipy.ndimage import gaussian_filter
+        grid_z = gaussian_filter(grid_z, sigma=blur_sigma)
 
-        title_suffix = (
-            f" ({'real-smoothed' if use_real else 'simulated'} – {dist}/{vario})"
-        )
+    # --------------------- 5. Plot ---------------------
+    fig, ax = plt.subplots(figsize=(14, 11), dpi=150)
 
-    # ---------- 5. Plot ----------
-    vmin, vmax = np.nanmin(grid_z), np.nanmax(grid_z)
-    fig, ax = plt.subplots(figsize=(12, 10), dpi=150)
-    im = ax.imshow(
-        grid_z,
-        extent=[min_x, max_x, min_y, max_y],
-        origin="lower",
-        cmap=cmap,
-        vmin=vmin,
-        vmax=vmax,
-    )
-    ax.set_title(chart_title + title_suffix)
+    im = ax.imshow(grid_z, extent=[min_x, max_x, min_y, max_y],
+                   origin='lower', cmap=cmap, interpolation='bilinear')
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label("Value", rotation=270, labelpad=20)
+
+    if show_contours:
+        for val, poly in all_contours:
+            ax.plot(poly[:,0], poly[:,1], color='white', linewidth=0.7, alpha=0.6)
+            # optional labels
+            if len(poly) > 10:
+                mid = len(poly)//2
+                ax.text(poly[mid,0], poly[mid,1], f"{val:.4g}",
+                        color='white', fontsize=7, ha='center',
+                        bbox=dict(boxstyle="round,pad=0.2", fc="black", alpha=0.6))
+
+    ax.set_title(chart_title + " – Contour-Aware Heatmap", fontsize=16, pad=20)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
-    ax.set_aspect("equal")
-    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-    cbar.set_label("Value")
+    ax.set_aspect('equal')
+    ax.grid(False)
     plt.tight_layout()
     st.pyplot(fig)
 # ==================================================================
