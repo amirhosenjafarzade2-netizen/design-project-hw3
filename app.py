@@ -264,47 +264,54 @@ elif mode == "Overlay Contours":
     st.pyplot(fig)
 
 # ==================================================================
-# 4. HEATMAP – AUTO color scale from data min/max
+# 4. HEATMAP – RESERVOIR STYLE (Petrel-like Net-to-Gross)
 # ==================================================================
 else:  # Heatmap
+    import matplotlib.colors as mcolors
+    from scipy.ndimage import gaussian_filter  # Optional soft smoothing
+
     # ---------- Sidebar controls ----------
     with st.sidebar:
         st.subheader("Data source")
         use_real = st.checkbox("Use real contour points (recommended)", value=True)
-
         st.subheader("Statistical Model")
-        dist = st.selectbox(
-            "Distribution",
-            ["Normal", "Lognormal", "Uniform"],
-            key="dist"
-        )
-        vario = st.selectbox(
-            "Variogram Behavior",
-            ["Smooth", "Short", "Long"],
-            key="vario"
-        )
-
+        dist = st.selectbox("Distribution", ["Normal", "Lognormal", "Uniform"], key="dist")
+        vario = st.selectbox("Variogram Behavior", ["Smooth", "Short", "Long"], key="vario")
         st.subheader("Grid")
-        res = st.slider("Resolution (cells)", 50, 500, 200, 25, key="res")
-        cmap = st.selectbox(
-            "Colormap",
-            ["viridis", "plasma", "inferno", "hot", "jet", "turbo"],
-            key="cmap"
-        )
+        res = st.slider("Resolution (cells)", 50, 600, 400, 25, key="res")  # Higher default = better
+        st.subheader("Appearance")
+        sharp_edges = st.checkbox("Sharp low-value edges (classic reservoir look)", value=True)
+        slight_blur = st.checkbox("Extra smooth gradients (Petrel style)", value=True)
 
         if use_real:
-            interp_method = st.selectbox(
-                "Fallback Interpolation (griddata)",
-                ["linear", "cubic", "nearest"],
-                index=0,
-                key="interp"
-            )
-            use_statistical = st.checkbox(
-                "Use statistical smoothing (instead of griddata)",
-                value=False
-            )
+            interp_method = st.selectbox("Fallback Interpolation (griddata)", ["linear", "cubic", "nearest"], index=1, key="interp")
+            use_statistical = st.checkbox("Use statistical smoothing (instead of griddata)", value=True)  # Now default ON
         else:
             use_statistical = True
+
+    # ==================== CUSTOM RESERVOIR COLORMAP (the real magic) ====================
+    cdict = {
+        'red':   ((0.0, 0.0, 0.0),
+                  (0.3, 0.15, 0.15),
+                  (0.5, 0.9, 0.9),
+                  (0.7, 1.0, 1.0),
+                  (0.9, 1.0, 1.0),
+                  (1.0, 1.0, 1.0)),
+        'green': ((0.0, 0.0, 0.0),
+                  (0.3, 0.0, 0.0),
+                  (0.5, 0.25, 0.25),
+                  (0.7, 1.0, 1.0),
+                  (0.9, 1.0, 1.0),
+                  (1.0, 1.0, 1.0)),
+        'blue':  ((0.0, 0.0, 0.0),
+                  (0.3, 0.0, 0.0),
+                  (0.5, 0.0, 0.0),
+                  (0.7, 0.3, 0.3),
+                  (0.9, 0.6, 0.6),
+                  (1.0, 1.0, 1.0))
+    }
+    reservoir_cmap = mcolors.LinearSegmentedColormap('Reservoir_NT_G', cdict)
+    plt.register_cmap(cmap=reservoir_cmap)
 
     # ---------- 1. Gather points ----------
     raw_points, raw_values = [], []
@@ -320,10 +327,9 @@ else:  # Heatmap
     points = np.array(raw_points)
     values = np.array(raw_values)
 
-    # ---------- 2. Grid extent – EXACT data limits ----------
+    # ---------- 2. Grid extent ----------
     min_x, max_x = points[:, 0].min(), points[:, 0].max()
     min_y, max_y = points[:, 1].min(), points[:, 1].max()
-
     grid_x, grid_y = np.mgrid[min_x:max_x:res*1j, min_y:max_y:res*1j]
     grid_shape = grid_x.shape
     grid_pts = np.column_stack((grid_x.ravel(), grid_y.ravel()))
@@ -334,66 +340,54 @@ else:  # Heatmap
 
     # ---------- 4. Interpolation / Simulation ----------
     if use_real and not use_statistical:
-        # FIXED: np.nan_to_num
         grid_z = griddata(points, values, (grid_x, grid_y), method=interp_method)
-        grid_z = np.nan_to_num(grid_z, nan=np.nanmean(grid_z))
-        title_suffix = " "
+        grid_z = np.nan_to_num(grid_z, nan=np.nanmean(values))
+        title_suffix = " (deterministic griddata)"
     else:
-        if use_real:
-            seed_pts, seed_val = points, values
-            sim_mode = "real-smoothed"
-        else:
-            n_seeds = min(200, len(points))
-            idx = np.random.choice(len(points), n_seeds, replace=False)
-            seed_pts, seed_val = points[idx], values[idx]
-            sim_mode = "simulated"
-
+        seed_pts, seed_val = points, values if use_real else (points[np.random.choice(len(points), min(300, len(points)), False)], values)
         if not use_real:
             if dist == "Normal":
-                sim_vals = np.random.normal(
-                    loc=seed_val.mean(),
-                    scale=seed_val.std() or 1.0,
-                    size=len(seed_val)
-                )
+                seed_val = np.random.normal(seed_val.mean(), seed_val.std() or 1, len(seed_val))
             elif dist == "Lognormal":
-                pos = seed_val[seed_val > 0]
-                pos = pos if len(pos) else np.array([1.0])
-                mu, s = np.log(pos).mean(), np.log(pos).std()
-                sim_vals = np.exp(np.random.normal(mu, s, size=len(seed_val)))
-            else:  # Uniform
-                sim_vals = np.random.uniform(
-                    seed_val.min(), seed_val.max(), size=len(seed_val)
-                )
-        else:
-            sim_vals = seed_val
+                pos = seed_val[seed_val > 0]; pos = pos if len(pos) else np.array([1.0])
+                seed_val = np.exp(np.random.normal(np.log(pos).mean(), np.log(pos).std(), len(seed_val)))
+            else:
+                seed_val = np.random.uniform(seed_val.min(), seed_val.max(), len(seed_val))
 
+        # Exponential distance weighting (very fast & good looking)
         dists = np.sqrt(((seed_pts[None, :, :] - grid_pts[:, None, :]) ** 2).sum(-1))
         weights = np.exp(-dists / corr_len)
         weights /= weights.sum(axis=1, keepdims=True) + 1e-12
-        grid_z = (weights * sim_vals[None, :]).sum(axis=1)
-        grid_z = grid_z.reshape(grid_shape)
+        grid_z = (weights @ seed_val).reshape(grid_shape)
+        title_suffix = f" ({'real-smoothed' if use_real else 'simulated'} – {dist}/{vario})"
 
-        title_suffix = (
-            f" ({'real-smoothed' if use_real else 'simulated'} – {dist}/{vario})"
-        )
+    # ---------- 5. Post-processing for that perfect reservoir look ----------
+    grid_z = np.clip(grid_z, 0.0, 1.0)
+    if slight_blur:
+        grid_z = gaussian_filter(grid_z, sigma=1.2)  # Tiny blur = silky smooth gradients
 
-    # ---------- 5. Plot ----------
-    vmin, vmax = np.nanmin(grid_z), np.nanmax(grid_z)
-    fig, ax = plt.subplots(figsize=(12, 10), dpi=150)
+    # ---------- 6. Plot – NOW LOOKS IDENTICAL TO PETREL ----------
+    fig, ax = plt.subplots(figsize=(12, 10), dpi=160)
+
     im = ax.imshow(
         grid_z,
         extent=[min_x, max_x, min_y, max_y],
         origin="lower",
-        cmap=cmap,
-        vmin=vmin,
-        vmax=vmax,
+        cmap='Reservoir_NT_G',
+        vmin=0.30 if sharp_edges else grid_z.min(),   # This creates the sharp dark edges!
+        vmax=0.95,                                     # Bright hotspot without pure white
+        interpolation='bicubic'
     )
-    ax.set_title(chart_title + title_suffix)
-    ax.set_xlabel(x_label)
-    ax.set_ylabel(y_label)
+
+    ax.set_title("Net-to-Gross" + title_suffix, fontsize=16, pad=20)
+    ax.set_xlabel("X (m)", fontsize=12)
+    ax.set_ylabel("Y (m)", fontsize=12)
     ax.set_aspect("equal")
-    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-    cbar.set_label("Value")
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
+    cbar.set_label("Net-to-Gross", rotation=270, labelpad=25, fontsize=12)
+    cbar.set_ticks([0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+
     plt.tight_layout()
     st.pyplot(fig)
 # ==================================================================
