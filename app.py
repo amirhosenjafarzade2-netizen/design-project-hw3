@@ -264,180 +264,186 @@ elif mode == "Overlay Contours":
     st.pyplot(fig)
 
 # ==================================================================
+# 4. HEATMAP – with manual color scale control (more control = more visible details)
 # ==================================================================
-# ==================================================================
-# ==================================================================
-# ==================================================================
-# 4. HEATMAP – ULTIMATE VERSION (Contour-Aware + Statistical + Detail Boost)
-# ==================================================================
-else:  # Heatmap – the one you've been waiting for
+else:  # Heatmap
+    # ---------- Sidebar controls ----------
     with st.sidebar:
-        st.subheader("Heatmap Mode")
-        interp_mode = st.radio("Interpolation Style", 
-                               ["Pure Contour-Aware (Exact & Fast)", 
-                                "Statistical / Simulated (Creative)"])
+        st.subheader("Data source")
+        use_real = st.checkbox("Use real contour points (recommended)", value=True)
 
-        res = st.slider("Grid Resolution", 200, 1200, 800, 50)
-        cmap = st.selectbox("Colormap", 
-                            ["viridis", "plasma", "inferno", "turbo", "magma", "hot", "jet", "cividis", "RdBu_r", "coolwarm"], 
-                            index=3)
+        st.subheader("Statistical Model")
+        dist = st.selectbox(
+            "Distribution",
+            ["Normal", "Lognormal", "Uniform"],
+            key="dist"
+        )
+        vario = st.selectbox(
+            "Variogram Behavior",
+            ["Smooth", "Short", "Long"],
+            key="vario"
+        )
 
-        # ——————— Shared controls ———————
-        detail_boost = st.slider("Detail Boost (Color Richness)", 0.3, 6.0, 1.5, 0.1,
-                                 help="Higher = much more color variation inside bands → super detailed look")
+        st.subheader("Grid")
+        res = st.slider("Resolution (cells)", 50, 500, 200, 25, key="res")
+        cmap = st.selectbox(
+            "Colormap",
+            ["viridis", "plasma", "inferno", "hot", "jet", "turbo", "cividis", "coolwarm", "RdBu_r"],
+            index=0,
+            key="cmap"
+        )
 
-        smoothness = st.slider("Final Smoothness", 0.0, 8.0, 2.2, 0.2)
+        # ==================== NEW: Color Scale Control ====================
+        st.subheader("Color Scale – Control Visible Detail")
+        auto_scale = st.checkbox("Auto scale (full data min → max)", value=True)
 
-        show_contours = st.checkbox("Overlay Original Contours", True)
-        if show_contours:
-            contour_lw = st.slider("Contour Line Width", 0.3, 2.5, 0.8, 0.1)
+        if use_real:
+            interp_method = st.selectbox(
+                "Fallback Interpolation (griddata)",
+                ["linear", "cubic", "nearest"],
+                index=0,
+                key="interp"
+            )
+            use_statistical = st.checkbox(
+                "Use statistical smoothing (instead of griddata)",
+                value=False
+            )
+        else:
+            use_statistical = True
 
-        st.subheader("Color Scale")
-        auto_scale = st.checkbox("Auto Color Scale", True)
-        if not auto_scale:
-            col1, col2 = st.columns(2)
-            with col1: vmin = st.number_input("Min Value", value=0.0)
-            with col2: vmax = st.number_input("Max Value", value=1000.0)
-
-        # ——————— Statistical mode only ———————
-        if interp_mode == "Statistical / Simulated (Creative)":
-            dist_type = st.selectbox("Distribution", ["Normal", "Lognormal", "Uniform"])
-            variogram = st.selectbox("Variogram Range", ["Short", "Smooth", "Long"])
-
-    from scipy.ndimage import gaussian_filter, distance_transform_edt
-    from skimage.draw import polygon
-
-    # =============== 1. Collect all data ===============
-    contours_by_val = {}
-    all_points = []
-    raw_pts, raw_vals = [], []
-
+    # ---------- 1. Gather points ----------
+    raw_points, raw_values = [], []
     for f in uploaded_files:
         for val, pts in parse_bna(f):
-            if len(pts) < 3: continue
-            poly = np.array(pts)
-            all_points.append(poly)
-            contours_by_val.setdefault(val, []).append(poly)
             for x, y in pts:
-                raw_pts.append([x, y])
-                raw_vals.append(val)
-
-    if not raw_pts:
-        st.error("No contour data found.")
+                raw_points.append([x, y])
+                raw_values.append(val)
+    if not raw_points:
+        st.error("No contour points found in the uploaded BNA files.")
         st.stop()
 
-    points = np.array(raw_pts)
-    values = np.array(raw_vals)
+    points = np.array(raw_points)
+    values = np.array(raw_values)
 
-    min_x = points[:,0].min(); max_x = points[:,0].max()
-    min_y = points[:,1].min(); max_y = points[:,1].max()
-    margin = 0.07 * max(max_x-min_x, max_y-min_y)
-    min_x -= margin; max_x += margin; min_y -= margin; max_y += margin
+    # ---------- 2. Grid extent – EXACT data limits ----------
+    min_x, max_x = points[:, 0].min(), points[:, 0].max()
+    min_y, max_y = points[:, 1].min(), points[:, 1].max()
 
-    xi = np.linspace(min_x, max_x, res)
-    yi = np.linspace(min_y, max_y, res)
-    grid_x, grid_y = np.meshgrid(xi, yi)
+    grid_x, grid_y = np.mgrid[min_x:max_x:res*1j, min_y:max_y:res*1j]
+    grid_shape = grid_x.shape
+    grid_pts = np.column_stack((grid_x.ravel(), grid_y.ravel()))
 
-    # =============== 2. Interpolation ===============
-    if interp_mode == "Pure Contour-Aware (Exact & Fast)":
-        # ——— Fast & perfect contour-aware ———
-        mask = np.zeros((res, res), dtype=bool)
-        for polys in contours_by_val.values():
-            for poly in polys:
-                px = np.interp(poly[:,0], [min_x, max_x], [0, res-1]).astype(int)
-                py = np.interp(poly[:,1], [min_y, max_y], [res-1, 0]).astype(int)
-                rr, cc = polygon(py, px, (res, res))
-                for dr in range(-7, 8):
-                    for dc in range(-7, 8):
-                        if dr*dr + dc*dc <= 49:
-                            r = np.clip(rr + dr, 0, res-1)
-                            c = np.clip(cc + dc, 0, res-1)
-                            mask[r, c] = True
+    # ---------- 3. Correlation length ----------
+    domain = max(max_x - min_x, max_y - min_y)
+    corr_len = {"Smooth": 0.30, "Short": 0.08, "Long": 0.60}[vario] * domain
 
-        dist = distance_transform_edt(~mask)
-
-        z_val = np.zeros((res, res))
-        z_weight = np.zeros((res, res))
-
-        for val, polys in contours_by_val.items():
-            level_mask = np.zeros((res, res), dtype=bool)
-            for poly in polys:
-                px = np.interp(poly[:,0], [min_x, max_x], [0, res-1]).astype(int)
-                py = np.interp(poly[:,1], [min_y, max_y], [res-1, 0]).astype(int)
-                rr, cc = polygon(py, px, (res, res))
-                for dr in range(-9, 10):
-                    for dc in range(-9, 10):
-                        if dr*dr + dc*dc <= 81:
-                            r = np.clip(rr + dr, 0, res-1)
-                            c = np.clip(cc + dc, 0, res-1)
-                            level_mask[r, c] = True
-            w = level_mask / (dist**2 + 1e-8)
-            z_val += val * w
-            z_weight += w
-
-        grid_z = z_val / (z_weight + 1e-12)
-
+    # ---------- 4. Interpolation / Simulation ----------
+    if use_real and not use_statistical:
+        grid_z = griddata(points, values, (grid_x, grid_y), method=interp_method)
+        grid_z = np.nan_to_num(grid_z, nan=np.nanmean(grid_z))
+        title_suffix = " (real – griddata)"
     else:
-        # ——— Your original statistical mode (but better) ———
-        domain = max(max_x-min_x, max_y-min_y)
-        corr_len_map = {"Short": 0.05, "Smooth": 0.22, "Long": 0.58}
-        corr_len = corr_len_map[variogram] * domain
-
-        # Simulate values if wanted
-        if dist_type == "Normal":
-            sim_vals = np.random.normal(values.mean(), values.std() or 1, len(values))
-        elif dist_type == "Lognormal":
-            pos = values[values > 0]; pos = pos if len(pos)>0 else values
-            mu, sigma = np.log(pos).mean(), np.log(pos).std()
-            sim_vals = np.exp(np.random.normal(mu, sigma, len(values)))
+        if use_real:
+            seed_pts, seed_val = points, values
+            sim_mode = "real-smoothed"
         else:
-            sim_vals = np.random.uniform(values.min(), values.max(), len(values))
+            n_seeds = min(200, len(points))
+            idx = np.random.choice(len(points), n_seeds, replace=False)
+            seed_pts, seed_val = points[idx], values[idx]
+            sim_mode = "simulated"
 
-        # Exponential IDW (your original style)
-        grid_pts = np.column_stack((grid_x.ravel(), grid_y.ravel()))
-        dists = np.sqrt(((points[None,:,:] - grid_pts[:,None,:])**2).sum(-1))
+        if not use_real:
+            if dist == "Normal":
+                sim_vals = np.random.normal(
+                    loc=seed_val.mean(),
+                    scale=seed_val.std() or 1.0,
+                    size=len(seed_val)
+                )
+            elif dist == "Lognormal":
+                pos = seed_val[seed_val > 0]
+                pos = pos if len(pos) else np.array([1.0])
+                mu, s = np.log(pos).mean(), np.log(pos).std()
+                sim_vals = np.exp(np.random.normal(mu, s, size=len(seed_val)))
+            else:  # Uniform
+                sim_vals = np.random.uniform(
+                    seed_val.min(), seed_val.max(), size=len(seed_val)
+                )
+        else:
+            sim_vals = seed_val
+
+        dists = np.sqrt(((seed_pts[None, :, :] - grid_pts[:, None, :]) ** 2).sum(-1))
         weights = np.exp(-dists / corr_len)
         weights /= weights.sum(axis=1, keepdims=True) + 1e-12
-        grid_z = (weights * sim_vals[None,:]).sum(axis=1).reshape(res, res)
+        grid_z = (weights * sim_vals[None, :]).sum(axis=1)
+        grid_z = grid_z.reshape(grid_shape)
 
-    # =============== 3. Post-processing ===============
-    # Final smoothing
-    if smoothness > 0:
-        grid_z = gaussian_filter(grid_z, sigma=smoothness)
+        title_suffix = (
+            f" ({'real-smoothed' if use_real else 'simulated'} – {dist}/{vario})"
+        )
 
-    # DETAIL BOOST — this is the magic you wanted!
-    if detail_boost != 1.0:
-        mean_val = np.nanmean(grid_z)
-        grid_z = mean_val + (grid_z - mean_val) * detail_boost
-        # Optional: power law for even more punch
-        if detail_boost > 2.0:
-            grid_z = np.sign(grid_z - mean_val) * np.abs(grid_z - mean_val)**0.8 + mean_val
+    # ---------- 5. Determine vmin/vmax (the new detail control!) ----------
+    if auto_scale:
+        vmin = np.nanmin(grid_z)
+        vmax = np.nanmax(grid_z)
+        scale_note = "Auto scale (full range)"
+    else:
+        # Smart defaults the first time user turns auto off
+        default_vmin = float(np.nanpercentile(grid_z, 5))
+        default_vmax = float(np.nanpercentile(grid_z, 95))
 
-    # =============== 4. Plot ===============
-    fig, ax = plt.subplots(figsize=(14, 11), dpi=160)
+        col1, col2 = st.columns(2)
+        with col1:
+            vmin = st.number_input("vmin (lower bound)", value=default_vmin, step=0.01)
+        with col2:
+            vmax = st.number_input("vmax (upper bound)", value=default_vmax, step=0.01)
 
-    vmin_final = np.nanpercentile(grid_z, 2) if auto_scale else vmin
-    vmax_final = np.nanpercentile(grid_z, 98) if auto_scale else vmax
+        if st.button("🧹 Set to 5th–95th percentile (recommended for high-contrast detail)"):
+            vmin = np.nanpercentile(grid_z, 5)
+            vmax = np.nanpercentile(grid_z, 95)
+            st.experimental_rerun()
 
-    im = ax.imshow(grid_z, extent=[min_x, max_x, min_y, max_y], origin='lower',
-                   cmap=cmap, vmin=vmin_final, vmax=vmax_final, interpolation='bilinear')
+        if st.button("🔄 Reset to full data range"):
+            st.experimental_rerun()  # will go back to auto defaults
 
-    if show_contours:
-        for polys in contours_by_val.values():
-            for poly in polys:
-                ax.plot(poly[:,0], poly[:,1], color='white', lw=contour_lw, alpha=0.8)
+        scale_note = f"Manual scale: {vmin:.4f} → {vmax:.4f}"
 
-    cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
-    cbar.set_label("Value", rotation=270, labelpad=20)
+    # Optional: warn if user sets vmin >= vmax
+    if not auto_scale and vmin >= vmax:
+        st.error("vmin must be less than vmax!")
+        st.stop()
 
-    mode_suffix = "Contour-Aware" if interp_mode.startswith("Pure") else "Statistical"
-    ax.set_title(f"{chart_title} – {mode_suffix} Heatmap", fontsize=16, pad=20)
+    # ---------- 6. Plot ----------
+    fig, ax = plt.subplots(figsize=(12, 10), dpi=150)
+
+    im = ax.imshow(
+        grid_z,
+        extent=[min_x, max_x, min_y, max_y],
+        origin="lower",
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="bilinear"  # smoother look
+    )
+
+    ax.set_title(chart_title + title_suffix + f"\n{scale_note}", fontsize=14)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
-    ax.set_aspect('equal')
-    ax.grid(False)
+    ax.set_aspect("equal")
+
+    # Better colorbar that respects manual limits
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8, extend='both' if not auto_scale else 'neither')
+    cbar.set_label("Value")
+
     plt.tight_layout()
     st.pyplot(fig)
+
+    # Optional info below the plot
+    if not auto_scale:
+        st.success(f"🖌️ Manual color scaling active – you are now seeing much more local detail!")
+        st.info(
+            "Tip: When your data has a few extreme values, narrowing the color range "
+            "(e.g. to 5th–95th percentile) reveals subtle gradients that would otherwise be invisible."
+        )
 # ==================================================================
 # PNG Download
 # ==================================================================
