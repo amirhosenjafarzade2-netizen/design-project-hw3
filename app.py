@@ -311,7 +311,7 @@ else:  # Heatmap
                   (1.0, 1.0, 1.0))
     }
     reservoir_cmap = mcolors.LinearSegmentedColormap('Reservoir_NT_G', cdict)
-    plt.register_cmap(cmap=reservoir_cmap)
+   
 
     # ---------- 1. Gather points ----------
     raw_points, raw_values = [], []
