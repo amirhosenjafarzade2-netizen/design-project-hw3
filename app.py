@@ -337,7 +337,7 @@ else:  # Heatmap
         # FIXED: np.nan_to_num
         grid_z = griddata(points, values, (grid_x, grid_y), method=interp_method)
         grid_z = np.nan_to_num(grid_z, nan=np.nanmean(grid_z))
-        title_suffix = " (real – griddata)"
+        title_suffix = " ( )"
     else:
         if use_real:
             seed_pts, seed_val = points, values
