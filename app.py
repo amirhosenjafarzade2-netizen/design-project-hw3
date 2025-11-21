@@ -267,106 +267,171 @@ elif mode == "Overlay Contours":
 # ==================================================================
 # ==================================================================
 # ==================================================================
-# 4. HEATMAP – FAST & BEAUTIFUL CONTOUR-AWARE (works 2025)
 # ==================================================================
-else:  # Heatmap (fast contour-aware – no deprecated matplotlib calls)
+# 4. HEATMAP – ULTIMATE VERSION (Contour-Aware + Statistical + Detail Boost)
+# ==================================================================
+else:  # Heatmap – the one you've been waiting for
     with st.sidebar:
-        st.subheader("Heatmap Settings")
-        res = st.slider("Grid resolution", 200, 1200, 700, 50)
-        cmap = st.selectbox("Colormap", ["viridis", "plasma", "inferno", "turbo", "hot", "jet", "RdBu_r", "cividis"], index=1)
-        smoothness = st.slider("Smoothness", 0.5, 6.0, 2.5, 0.5)
-        show_contours = st.checkbox("Overlay original contours", True)
-        contour_lw = st.slider("Contour linewidth", 0.4, 2.0, 0.9, 0.1) if show_contours else 0
+        st.subheader("Heatmap Mode")
+        interp_mode = st.radio("Interpolation Style", 
+                               ["Pure Contour-Aware (Exact & Fast)", 
+                                "Statistical / Simulated (Creative)"])
+
+        res = st.slider("Grid Resolution", 200, 1200, 800, 50)
+        cmap = st.selectbox("Colormap", 
+                            ["viridis", "plasma", "inferno", "turbo", "magma", "hot", "jet", "cividis", "RdBu_r", "coolwarm"], 
+                            index=3)
+
+        # ——————— Shared controls ———————
+        detail_boost = st.slider("Detail Boost (Color Richness)", 0.3, 6.0, 1.5, 0.1,
+                                 help="Higher = much more color variation inside bands → super detailed look")
+
+        smoothness = st.slider("Final Smoothness", 0.0, 8.0, 2.2, 0.2)
+
+        show_contours = st.checkbox("Overlay Original Contours", True)
+        if show_contours:
+            contour_lw = st.slider("Contour Line Width", 0.3, 2.5, 0.8, 0.1)
+
+        st.subheader("Color Scale")
+        auto_scale = st.checkbox("Auto Color Scale", True)
+        if not auto_scale:
+            col1, col2 = st.columns(2)
+            with col1: vmin = st.number_input("Min Value", value=0.0)
+            with col2: vmax = st.number_input("Max Value", value=1000.0)
+
+        # ——————— Statistical mode only ———————
+        if interp_mode == "Statistical / Simulated (Creative)":
+            dist_type = st.selectbox("Distribution", ["Normal", "Lognormal", "Uniform"])
+            variogram = st.selectbox("Variogram Range", ["Short", "Smooth", "Long"])
 
     from scipy.ndimage import gaussian_filter, distance_transform_edt
     from skimage.draw import polygon
 
-    # 1. Collect all contours grouped by value
+    # =============== 1. Collect all data ===============
     contours_by_val = {}
     all_points = []
+    raw_pts, raw_vals = [], []
+
     for f in uploaded_files:
         for val, pts in parse_bna(f):
-            if len(pts) < 3: 
-                continue
+            if len(pts) < 3: continue
             poly = np.array(pts)
             all_points.append(poly)
             contours_by_val.setdefault(val, []).append(poly)
+            for x, y in pts:
+                raw_pts.append([x, y])
+                raw_vals.append(val)
 
-    if not all_points:
-        st.error("No valid contours found.")
+    if not raw_pts:
+        st.error("No contour data found.")
         st.stop()
 
-    all_points = np.vstack(all_points)
-    min_x, max_x = all_points[:,0].min(), all_points[:,0].max()
-    min_y, max_y = all_points[:,1].min(), all_points[:,1].max()
-    margin = 0.06 * max(max_x-min_x, max_y-min_y)
+    points = np.array(raw_pts)
+    values = np.array(raw_vals)
+
+    min_x = points[:,0].min(); max_x = points[:,0].max()
+    min_y = points[:,1].min(); max_y = points[:,1].max()
+    margin = 0.07 * max(max_x-min_x, max_y-min_y)
     min_x -= margin; max_x += margin; min_y -= margin; max_y += margin
 
-    # Create grid
-    xi, yi = np.linspace(min_x, max_x, res), np.linspace(min_y, max_y, res)
+    xi = np.linspace(min_x, max_x, res)
+    yi = np.linspace(min_y, max_y, res)
     grid_x, grid_y = np.meshgrid(xi, yi)
-    height, width = res, res
 
-    # 2. Create a binary mask where contours are drawn (thick lines)
-    contour_mask = np.zeros((height, width), dtype=bool)
+    # =============== 2. Interpolation ===============
+    if interp_mode == "Pure Contour-Aware (Exact & Fast)":
+        # ——— Fast & perfect contour-aware ———
+        mask = np.zeros((res, res), dtype=bool)
+        for polys in contours_by_val.values():
+            for poly in polys:
+                px = np.interp(poly[:,0], [min_x, max_x], [0, res-1]).astype(int)
+                py = np.interp(poly[:,1], [min_y, max_y], [res-1, 0]).astype(int)
+                rr, cc = polygon(py, px, (res, res))
+                for dr in range(-7, 8):
+                    for dc in range(-7, 8):
+                        if dr*dr + dc*dc <= 49:
+                            r = np.clip(rr + dr, 0, res-1)
+                            c = np.clip(cc + dc, 0, res-1)
+                            mask[r, c] = True
 
-    for val, polys in contours_by_val.items():
-        for poly in polys:
-            # Convert polygon coordinates to image indices
-            poly_x = np.interp(poly[:,0], [min_x, max_x], [0, width-1]).astype(int)
-            poly_y = np.interp(poly[:,1], [min_y, max_y], [height-1, 0]).astype(int)  # y flipped
-            rr, cc = polygon(poly_y, poly_x, (height, width))
-            # Thicken the line
-            for dr in range(-6, 7):
-                for dc in range(-6, 7):
-                    if dr*dr + dc*dc <= 36:  # circle radius ~6 pixels
-                        r = np.clip(rr + dr, 0, height-1)
-                        c = np.clip(cc + dc, 0, width-1)
-                        contour_mask[r, c] = True
+        dist = distance_transform_edt(~mask)
 
-    # 3. Distance transform → how far each pixel is from nearest contour
-    dist = distance_transform_edt(~contour_mask)
+        z_val = np.zeros((res, res))
+        z_weight = np.zeros((res, res))
 
-    # 4. Weighted sum of all contour values (inverse distance squared)
-    value_map = np.zeros((height, width))
-    weight_map = np.zeros((height, width))
+        for val, polys in contours_by_val.items():
+            level_mask = np.zeros((res, res), dtype=bool)
+            for poly in polys:
+                px = np.interp(poly[:,0], [min_x, max_x], [0, res-1]).astype(int)
+                py = np.interp(poly[:,1], [min_y, max_y], [res-1, 0]).astype(int)
+                rr, cc = polygon(py, px, (res, res))
+                for dr in range(-9, 10):
+                    for dc in range(-9, 10):
+                        if dr*dr + dc*dc <= 81:
+                            r = np.clip(rr + dr, 0, res-1)
+                            c = np.clip(cc + dc, 0, res-1)
+                            level_mask[r, c] = True
+            w = level_mask / (dist**2 + 1e-8)
+            z_val += val * w
+            z_weight += w
 
-    for val, polys in contours_by_val.items():
-        val_mask = np.zeros((height, width), dtype=bool)
-        for poly in polys:
-            poly_x = np.interp(poly[:,0], [min_x, max_x], [0, width-1]).astype(int)
-            poly_y = np.interp(poly[:,1], [min_y, max_y], [height-1, 0]).astype(int)
-            rr, cc = polygon(poly_y, poly_x, (height, width))
-            for dr in range(-8, 9):
-                for dc in range(-8, 9):
-                    if dr*dr + dc*dc <= 64:
-                        r = np.clip(rr + dr, 0, height-1)
-                        c = np.clip(cc + dc, 0, width-1)
-                        val_mask[r, c] = True
+        grid_z = z_val / (z_weight + 1e-12)
 
-        w = val_mask.astype(float) / (dist**2 + 1e-8)
-        value_map += val * w
-        weight_map += w
+    else:
+        # ——— Your original statistical mode (but better) ———
+        domain = max(max_x-min_x, max_y-min_y)
+        corr_len_map = {"Short": 0.05, "Smooth": 0.22, "Long": 0.58}
+        corr_len = corr_len_map[variogram] * domain
 
-    grid_z = value_map / (weight_map + 1e-12)
+        # Simulate values if wanted
+        if dist_type == "Normal":
+            sim_vals = np.random.normal(values.mean(), values.std() or 1, len(values))
+        elif dist_type == "Lognormal":
+            pos = values[values > 0]; pos = pos if len(pos)>0 else values
+            mu, sigma = np.log(pos).mean(), np.log(pos).std()
+            sim_vals = np.exp(np.random.normal(mu, sigma, len(values)))
+        else:
+            sim_vals = np.random.uniform(values.min(), values.max(), len(values))
 
-    # 5. Final smoothing
-    grid_z = gaussian_filter(grid_z, sigma=smoothness)
+        # Exponential IDW (your original style)
+        grid_pts = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+        dists = np.sqrt(((points[None,:,:] - grid_pts[:,None,:])**2).sum(-1))
+        weights = np.exp(-dists / corr_len)
+        weights /= weights.sum(axis=1, keepdims=True) + 1e-12
+        grid_z = (weights * sim_vals[None,:]).sum(axis=1).reshape(res, res)
 
-    # 6. Plot
+    # =============== 3. Post-processing ===============
+    # Final smoothing
+    if smoothness > 0:
+        grid_z = gaussian_filter(grid_z, sigma=smoothness)
+
+    # DETAIL BOOST — this is the magic you wanted!
+    if detail_boost != 1.0:
+        mean_val = np.nanmean(grid_z)
+        grid_z = mean_val + (grid_z - mean_val) * detail_boost
+        # Optional: power law for even more punch
+        if detail_boost > 2.0:
+            grid_z = np.sign(grid_z - mean_val) * np.abs(grid_z - mean_val)**0.8 + mean_val
+
+    # =============== 4. Plot ===============
     fig, ax = plt.subplots(figsize=(14, 11), dpi=160)
+
+    vmin_final = np.nanpercentile(grid_z, 2) if auto_scale else vmin
+    vmax_final = np.nanpercentile(grid_z, 98) if auto_scale else vmax
+
     im = ax.imshow(grid_z, extent=[min_x, max_x, min_y, max_y], origin='lower',
-                   cmap=cmap, interpolation='bilinear')
+                   cmap=cmap, vmin=vmin_final, vmax=vmax_final, interpolation='bilinear')
 
     if show_contours:
-        for val, polys in contours_by_val.items():
+        for polys in contours_by_val.values():
             for poly in polys:
-                ax.plot(poly[:,0], poly[:,1], color='white', linewidth=contour_lw, alpha=0.75)
+                ax.plot(poly[:,0], poly[:,1], color='white', lw=contour_lw, alpha=0.8)
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
     cbar.set_label("Value", rotation=270, labelpad=20)
 
-    ax.set_title(chart_title + " – Fast & Accurate Contour Heatmap", fontsize=16, pad=20)
+    mode_suffix = "Contour-Aware" if interp_mode.startswith("Pure") else "Statistical"
+    ax.set_title(f"{chart_title} – {mode_suffix} Heatmap", fontsize=16, pad=20)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_aspect('equal')
