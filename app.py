@@ -264,7 +264,7 @@ elif mode == "Overlay Contours":
     st.pyplot(fig)
 
 # ==================================================================
-# 4. HEATMAP – with manual color scale control (more control = more visible details)
+# 4. HEATMAP – AUTO color scale from data min/max
 # ==================================================================
 else:  # Heatmap
     # ---------- Sidebar controls ----------
@@ -288,14 +288,9 @@ else:  # Heatmap
         res = st.slider("Resolution (cells)", 50, 500, 200, 25, key="res")
         cmap = st.selectbox(
             "Colormap",
-            ["viridis", "plasma", "inferno", "hot", "jet", "turbo", "cividis", "coolwarm", "RdBu_r"],
-            index=0,
+            ["viridis", "plasma", "inferno", "hot", "jet", "turbo"],
             key="cmap"
         )
-
-        # ==================== NEW: Color Scale Control ====================
-        st.subheader("Color Scale – Control Visible Detail")
-        auto_scale = st.checkbox("Auto scale (full data min → max)", value=True)
 
         if use_real:
             interp_method = st.selectbox(
@@ -339,6 +334,7 @@ else:  # Heatmap
 
     # ---------- 4. Interpolation / Simulation ----------
     if use_real and not use_statistical:
+        # FIXED: np.nan_to_num
         grid_z = griddata(points, values, (grid_x, grid_y), method=interp_method)
         grid_z = np.nan_to_num(grid_z, nan=np.nanmean(grid_z))
         title_suffix = " (real – griddata)"
@@ -381,40 +377,9 @@ else:  # Heatmap
             f" ({'real-smoothed' if use_real else 'simulated'} – {dist}/{vario})"
         )
 
-    # ---------- 5. Determine vmin/vmax (the new detail control!) ----------
-    if auto_scale:
-        vmin = np.nanmin(grid_z)
-        vmax = np.nanmax(grid_z)
-        scale_note = "Auto scale (full range)"
-    else:
-        # Smart defaults the first time user turns auto off
-        default_vmin = float(np.nanpercentile(grid_z, 5))
-        default_vmax = float(np.nanpercentile(grid_z, 95))
-
-        col1, col2 = st.columns(2)
-        with col1:
-            vmin = st.number_input("vmin (lower bound)", value=default_vmin, step=0.01)
-        with col2:
-            vmax = st.number_input("vmax (upper bound)", value=default_vmax, step=0.01)
-
-        if st.button("🧹 Set to 5th–95th percentile (recommended for high-contrast detail)"):
-            vmin = np.nanpercentile(grid_z, 5)
-            vmax = np.nanpercentile(grid_z, 95)
-            st.experimental_rerun()
-
-        if st.button("🔄 Reset to full data range"):
-            st.experimental_rerun()  # will go back to auto defaults
-
-        scale_note = f"Manual scale: {vmin:.4f} → {vmax:.4f}"
-
-    # Optional: warn if user sets vmin >= vmax
-    if not auto_scale and vmin >= vmax:
-        st.error("vmin must be less than vmax!")
-        st.stop()
-
-    # ---------- 6. Plot ----------
+    # ---------- 5. Plot ----------
+    vmin, vmax = np.nanmin(grid_z), np.nanmax(grid_z)
     fig, ax = plt.subplots(figsize=(12, 10), dpi=150)
-
     im = ax.imshow(
         grid_z,
         extent=[min_x, max_x, min_y, max_y],
@@ -422,28 +387,15 @@ else:  # Heatmap
         cmap=cmap,
         vmin=vmin,
         vmax=vmax,
-        interpolation="bilinear"  # smoother look
     )
-
-    ax.set_title(chart_title + title_suffix + f"\n{scale_note}", fontsize=14)
+    ax.set_title(chart_title + title_suffix)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_aspect("equal")
-
-    # Better colorbar that respects manual limits
-    cbar = fig.colorbar(im, ax=ax, shrink=0.8, extend='both' if not auto_scale else 'neither')
+    cbar = plt.colorbar(im, ax=ax, shrink=0.8)
     cbar.set_label("Value")
-
     plt.tight_layout()
     st.pyplot(fig)
-
-    # Optional info below the plot
-    if not auto_scale:
-        st.success(f"🖌️ Manual color scaling active – you are now seeing much more local detail!")
-        st.info(
-            "Tip: When your data has a few extreme values, narrowing the color range "
-            "(e.g. to 5th–95th percentile) reveals subtle gradients that would otherwise be invisible."
-        )
 # ==================================================================
 # PNG Download
 # ==================================================================
